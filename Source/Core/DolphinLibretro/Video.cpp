@@ -31,6 +31,7 @@
 #endif
 
 #include "Common/Logging/Log.h"
+#include "Common/ScopeGuard.h"
 #include "Common/Version.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
@@ -243,8 +244,10 @@ bool SetHWRender(retro_hw_context_type type, const int version_major, const int 
           NULL, // destroy_device
 #ifdef __APPLE__
           Vk::CreateInstance, // create_instance (v2 API)
-          NULL, // create_device2
+#else
+          NULL, // create_instance
 #endif
+          Vk::CreateDevice2, // create_device2 (v2 API)
       };
       environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, (void*)&iface);
 
@@ -659,12 +662,16 @@ VkInstance CreateInstance(PFN_vkGetInstanceProcAddr get_instance_proc_addr,
 }
 #endif
 
-bool CreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysicalDevice gpu,
-                         VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
-                         const char** required_device_extensions,
-                         unsigned num_required_device_extensions,
-                         const char** required_device_layers, unsigned num_required_device_layers,
-                         const VkPhysicalDeviceFeatures* required_features)
+static bool CreateDeviceCommon(retro_vulkan_context* context, VkInstance instance,
+                               VkPhysicalDevice gpu, VkSurfaceKHR surface,
+                               PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                               const char** required_device_extensions,
+                               unsigned num_required_device_extensions,
+                               const char** required_device_layers,
+                               unsigned num_required_device_layers,
+                               const VkPhysicalDeviceFeatures* required_features,
+                               retro_vulkan_create_device_wrapper_t create_device_wrapper,
+                               void* opaque)
 {
   assert(g_video_backend->GetConfigName() == "Vulkan");
 
@@ -672,7 +679,15 @@ bool CreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysical
 
   Init(instance, gpu, surface, get_instance_proc_addr, required_device_extensions,
        num_required_device_extensions, required_device_layers, num_required_device_layers,
-       required_features);
+       required_features, create_device_wrapper, opaque);
+
+  // The wrapper and its opaque are arguments to the negotiation call that got
+  // here, and libretro_vulkan.h promises nothing about them past its return, so
+  // they must not outlive it. The one device they exist to build is created
+  // below; the guard clears both on every path out of this function, the early
+  // error returns included, so nothing can hand them back to the frontend after
+  // the call that supplied them has returned.
+  Common::ScopeGuard forget_wrapper([] { ForgetCreateDeviceWrapper(); });
 
   if (!Vulkan::LoadVulkanInstanceFunctions(instance))
   {
@@ -710,6 +725,30 @@ bool CreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysical
   context->presentation_queue_family_index = context->queue_family_index;
 
   return true;
+}
+
+bool CreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysicalDevice gpu,
+                         VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                         const char** required_device_extensions,
+                         unsigned num_required_device_extensions,
+                         const char** required_device_layers, unsigned num_required_device_layers,
+                         const VkPhysicalDeviceFeatures* required_features)
+{
+  return CreateDeviceCommon(context, instance, gpu, surface, get_instance_proc_addr,
+                            required_device_extensions, num_required_device_extensions,
+                            required_device_layers, num_required_device_layers, required_features,
+                            nullptr, nullptr);
+}
+
+bool CreateDevice2(retro_vulkan_context* context, VkInstance instance, VkPhysicalDevice gpu,
+                   VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                   retro_vulkan_create_device_wrapper_t create_device_wrapper, void* opaque)
+{
+  // v2 passes no required extensions, layers or features: the frontend merges
+  // whatever it needs into the VkDeviceCreateInfo inside create_device_wrapper,
+  // which the warped vkCreateDevice calls in place of the real one.
+  return CreateDeviceCommon(context, instance, gpu, surface, get_instance_proc_addr, nullptr, 0,
+                            nullptr, 0, nullptr, create_device_wrapper, opaque);
 }
 }  // namespace Vk
 #endif

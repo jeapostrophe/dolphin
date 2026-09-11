@@ -28,8 +28,10 @@
 #include "VideoBackends/Vulkan/VulkanLoader.h"
 #endif
 #include "VideoBackends/Vulkan/VulkanContext.h"
-#include "DolphinLibretro/Vulkan.h"
+// Before Vulkan.h: Vk::Init() takes the frontend's CreateDevice wrapper, whose
+// type is declared here.
 #include <libretro_vulkan.h>
+#include "DolphinLibretro/Vulkan.h"
 #endif
 
 namespace Libretro
@@ -247,6 +249,9 @@ bool CreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysical
                   unsigned num_required_device_extensions,
                   const char** required_device_layers, unsigned num_required_device_layers,
                   const VkPhysicalDeviceFeatures* required_features);
+bool CreateDevice2(retro_vulkan_context* context, VkInstance instance, VkPhysicalDevice gpu,
+                   VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                   retro_vulkan_create_device_wrapper_t create_device_wrapper, void* opaque);
 } // namespace Vk
 #endif
 

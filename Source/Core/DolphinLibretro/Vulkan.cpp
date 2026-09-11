@@ -74,6 +74,8 @@ static struct
   const char** required_device_layers;
   unsigned num_required_device_layers;
   const VkPhysicalDeviceFeatures* required_features;
+  retro_vulkan_create_device_wrapper_t create_device_wrapper;
+  void* opaque;
 } initInfo;
 static bool DEDICATED_ALLOCATION;
 
@@ -209,6 +211,28 @@ static VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDe
   info.ppEnabledExtensionNames = info.enabledExtensionCount ? filtered_exts.data() : nullptr;
 
   info.pEnabledFeatures = &enabled_features;
+
+  // With the v2 context negotiation interface the device must be built by the
+  // frontend's wrapper rather than by vkCreateDevice, so that the frontend can
+  // add the extensions, features and pNext structures it needs of its own
+  // (libretro_vulkan.h: "Rather than call vkCreateDevice directly, a core must
+  // call the CreateDevice wrapper provided"). The wrapper takes no allocator;
+  // Dolphin's only call site passes none, and nothing in the ABI would let us
+  // honour one, so say so loudly if a future call site starts passing one
+  // rather than drop it on the floor.
+  if (initInfo.create_device_wrapper)
+  {
+    if (pAllocator)
+      ERROR_LOG_FMT(VIDEO, "create_device2: the frontend's CreateDevice wrapper takes no "
+                           "VkAllocationCallbacks; the ones passed here are being ignored");
+
+    VkDevice device = initInfo.create_device_wrapper(physicalDevice, initInfo.opaque, &info);
+    if (device == VK_NULL_HANDLE)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+    *pDevice = device;
+    return VK_SUCCESS;
+  }
 
   // Call through to the original
   return vkCreateDevice_org(physicalDevice, &info, pAllocator, pDevice);
@@ -573,7 +597,8 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice dev
 void Init(VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface,
           PFN_vkGetInstanceProcAddr get_instance_proc_addr, const char** required_device_extensions,
           unsigned num_required_device_extensions, const char** required_device_layers,
-          unsigned num_required_device_layers, const VkPhysicalDeviceFeatures* required_features)
+          unsigned num_required_device_layers, const VkPhysicalDeviceFeatures* required_features,
+          retro_vulkan_create_device_wrapper_t create_device_wrapper, void* opaque)
 {
   assert(surface);
 
@@ -603,6 +628,8 @@ void Init(VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface,
   initInfo.required_device_layers = required_device_layers;
   initInfo.num_required_device_layers = num_required_device_layers;
   initInfo.required_features = required_features;
+  initInfo.create_device_wrapper = create_device_wrapper;
+  initInfo.opaque = opaque;
 
   vkGetInstanceProcAddr_org = get_instance_proc_addr;
   ::vkGetInstanceProcAddr = vkGetInstanceProcAddr;
@@ -610,6 +637,12 @@ void Init(VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface,
     (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr_org(instance, "vkGetDeviceProcAddr");
   ::vkGetDeviceProcAddr = vkGetDeviceProcAddr;
   ::vkCreateInstance = vkCreateInstance;
+}
+
+void ForgetCreateDeviceWrapper()
+{
+  initInfo.create_device_wrapper = nullptr;
+  initInfo.opaque = nullptr;
 }
 
 void SetSurfaceSize(uint32_t width, uint32_t height)
