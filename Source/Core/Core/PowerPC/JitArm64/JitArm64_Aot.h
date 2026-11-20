@@ -89,6 +89,9 @@ constexpr u32 R_COUNT = R_QUANTIZED + 32;
 constexpr u32 LINKS_GROUP = 4096;
 constexpr u32 LINKS_GROUPS = 64;
 constexpr u32 LINKS_MAX = LINKS_GROUP * LINKS_GROUPS;
+// Each link's stub, its slot's value while its block is not there: DISPATCHER_PC = the link's
+// address, then the dispatcher's lookup (4 instructions).
+constexpr u32 LINK_STUB_SIZE = 16;
 
 class Imports final : public Arm64Gen::AotImportResolver
 {
@@ -142,11 +145,12 @@ struct State
   size_t image_code_size = 0;
   std::unordered_multimap<u64, ImageBlock> image_blocks;  // (feature_flags << 32 | ea)
   // Links: entry k holds the code an exit to link_keys[k] (feature_flags << 32 | ea) branches to,
-  // that block's entry or the dispatcher's (link_fallback)
+  // that block's entry or its stub (link_stubs + LINK_STUB_SIZE * k: the image's, after its
+  // blocks; a shape run's, at the end of the far code region, which the form does not use)
   std::unique_ptr<const u8*[]> link_table;
   std::vector<u64> link_keys;
   std::unordered_map<u64, u32> link_slot_of;
-  const u8* link_fallback = nullptr;
+  const u8* link_stubs = nullptr;
   // Facts: the compile's, as it asks them (shape logs them); emit answers from its record's
   std::vector<u32> facts;
   const std::vector<u32>* emit_facts = nullptr;

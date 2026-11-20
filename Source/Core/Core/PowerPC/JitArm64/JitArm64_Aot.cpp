@@ -6,10 +6,12 @@
 // An image is <prefix>.code and <prefix>.meta, linked into one dylib by retro-trainer's
 // `cores/cores.sh aot link` (the code in __TEXT,__text between rt_aot_code and rt_aot_code_end,
 // the meta in __TEXT,__const between rt_aot_meta and rt_aot_meta_end). The code is the shared
-// routines (GenerateAsm's, AOT-shaped), from offset 0, then the blocks. The meta, little-endian, is
+// routines (GenerateAsm's, AOT-shaped), from offset 0, then the blocks, then the links' stubs. The
+// meta, little-endian, is
 // ImageHeader, then u32 words: the routines' size, R_COUNT, the routine entry offsets
-// (JitArm64::AotRoutines's order, then the quantized tables'), the link count and each link's
-// ea and feature_flags (its slot is its index; "Links", below), then per block
+// (JitArm64::AotRoutines's order, then the quantized tables'), the link count, each link's ea and
+// feature_flags (its slot is its index; "Links", below) and the offset of the links' stubs, then per
+// block
 //   ea, feature_flags, nops, nhooks, nfacts, code_off, code_len, ops[2 * nops] (each op's address
 //   and word), hooks[2 * nhooks] (each op address HLE hooks, and its hook index), facts[4 * nfacts]
 //   ("Facts", below),
@@ -28,6 +30,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 
 #ifndef _WIN32
@@ -516,9 +519,14 @@ void JitArm64::AotRegisterRoutines()
   for (u32 i = 0; i < R_QUANTIZED; i++)
     m_aot->imports.Set(i, r[i]);
   AotFillImportTable();
-  m_aot->link_fallback = dispatcher_no_timing_check;
-  for (size_t k = 0; k < m_aot->link_keys.size(); k++)
-    m_aot->link_table[k] = m_aot->link_fallback;
+  // shape: the stubs at the end of the far code region (cleared with the cache, so written again)
+  if (m_aot->mode == Mode::Shape)
+  {
+    u8* stubs = m_far_code_0.GetWritableCodeEnd() - LINK_STUB_SIZE * LINKS_MAX;
+    m_aot->link_stubs = stubs;
+    for (u32 k = 0; k < m_aot->link_keys.size(); k++)
+      AotWriteLinkStub(stubs + LINK_STUB_SIZE * k, k);
+  }
 }
 
 // Routine pointers from an image's entry offsets (load, interp).
@@ -540,9 +548,8 @@ void JitArm64::AotBindRoutines(const u8* code, const u32* entries)
   for (u32 i = 0; i < R_QUANTIZED; i++)
     m_aot->imports.Set(i, r[i]);
   AotFillImportTable();
-  m_aot->link_fallback = dispatcher_no_timing_check;
-  for (size_t k = 0; k < m_aot->link_keys.size(); k++)
-    m_aot->link_table[k] = m_aot->link_fallback;
+  for (u32 k = 0; k < m_aot->link_keys.size(); k++)
+    m_aot->link_table[k] = AotLinkStub(k);
 }
 
 // Links. Every exit to a known address (WriteExit) is linked as the JIT links, but through a table
@@ -551,12 +558,37 @@ void JitArm64::AotBindRoutines(const u8* code, const u32* entries)
 // a shape run compiles one and logged ("L k ea feature_flags"), so the emit, which compiles from
 // the log, gives each the same slot, and the image lists them in slot order. A slot holds its
 // block's entry from when the block is compiled (shape) or installed (load, interp) until it is
-// destroyed, and otherwise dispatcher_no_timing_check, whose lookup finds, installs or interprets
-// it (DISPATCHER_PC holds the address either way). The exit checks the time first, as a linked
-// exit does: the dispatcher's code is never between two linked blocks.
+// destroyed, and otherwise the link's stub, which sets DISPATCHER_PC to the address and enters
+// dispatcher_no_timing_check, whose lookup finds, installs or interprets the block. The exit
+// checks the time first, as a linked exit does, and sets DISPATCHER_PC only on its way to
+// do_timing: the dispatcher's code is never between two linked blocks.
 void JitArm64::AotAllocLinks()
 {
   m_aot->link_table = std::make_unique<const u8*[]>(LINKS_MAX);
+}
+
+const u8* JitArm64::AotLinkStub(u32 k) const
+{
+  return m_aot->link_stubs + LINK_STUB_SIZE * k;
+}
+
+void JitArm64::AotWriteLinkStub(u8* at, u32 k)
+{
+  const u32 destination = static_cast<u32>(m_aot->link_keys[k]);
+  const bool executable = m_aot->mode == Mode::Shape;
+  ARM64XEmitter e(at, at + LINK_STUB_SIZE);
+  e.SetAotResolver(&m_aot->imports);
+  std::optional<Common::ScopedJITPageWriteAndNoExecute> write;
+  if (executable)
+    write.emplace(at);
+  e.MOVZ(DISPATCHER_PC, destination & 0xffff);
+  e.MOVK(DISPATCHER_PC, destination >> 16, ShiftAmount::Shift16);
+  e.AotLoadImport(ARM64Reg::X30, dispatcher_no_timing_check, "link stub");
+  e.BR(ARM64Reg::X30);
+  ASSERT(e.GetCodePtr() == at + LINK_STUB_SIZE);
+  if (executable)
+    e.FlushIcache();
+  m_aot->link_table[k] = at;
 }
 
 u32 JitArm64::AotLinkSlot(u32 destination)
@@ -575,7 +607,7 @@ u32 JitArm64::AotLinkSlot(u32 destination)
   const u32 k = static_cast<u32>(m_aot->link_keys.size());
   m_aot->link_keys.push_back(key);
   m_aot->link_slot_of.emplace(key, k);
-  m_aot->link_table[k] = m_aot->link_fallback;
+  AotWriteLinkStub(const_cast<u8*>(AotLinkStub(k)), k);
   if (m_aot->log)
     fprintf(m_aot->log, "L %u %08x %x\n", k, destination, m_ppc_state.feature_flags);
   return k;
@@ -596,7 +628,7 @@ void JitArm64::AotUnlink(const JitBlock& block)
   if (const auto it = m_aot->link_slot_of.find(key);
       it != m_aot->link_slot_of.end() && m_aot->link_table[it->second] == block.normalEntry)
   {
-    m_aot->link_table[it->second] = m_aot->link_fallback;
+    m_aot->link_table[it->second] = AotLinkStub(it->second);
     m_aot->stats.unlinks++;
   }
 }
@@ -888,6 +920,10 @@ bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
       return refuse(fmt::format("links: link {} ({:08x}) is listed twice", k, w[0]));
     m_aot->link_keys.push_back(key);
   }
+  if (end - w < 1 || w[0] < routines_size ||
+      static_cast<u64>(w[0]) + static_cast<u64>(LINK_STUB_SIZE) * nlinks > got.code_size)
+    return refuse("links: their stubs are not inside the code");
+  m_aot->link_stubs = code + *w++;
   m_aot->image_blocks.clear();
   for (u32 i = 0; i < got.nblocks; i++)
   {
@@ -1239,6 +1275,11 @@ void JitArm64::AotEmit()
   }
   m_ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(saved_ff);
 
+  const u32 stubs_off = static_cast<u32>(code.size());
+  code.resize(code.size() + LINK_STUB_SIZE * m_aot->link_keys.size());
+  for (u32 k = 0; k < m_aot->link_keys.size(); k++)
+    AotWriteLinkStub(code.data() + stubs_off + LINK_STUB_SIZE * k, k);
+
   std::vector<u8> meta(sizeof(ImageHeader));
   u8 core_uuid[16];
   if ((!cfg.core_uuid.empty() && !ParseHex16(cfg.core_uuid, core_uuid)) ||
@@ -1254,6 +1295,7 @@ void JitArm64::AotEmit()
   body.push_back(static_cast<u32>(m_aot->link_keys.size()));
   for (const u64 key : m_aot->link_keys)
     body.insert(body.end(), {static_cast<u32>(key), static_cast<u32>(key >> 32)});
+  body.push_back(stubs_off);
   body.insert(body.end(), meta_blocks.begin(), meta_blocks.end());
   const u8* bb = reinterpret_cast<const u8*>(body.data());
   meta.insert(meta.end(), bb, bb + 4 * body.size());

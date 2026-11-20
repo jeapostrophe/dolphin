@@ -553,11 +553,12 @@ void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return
   if (m_aot)
   {
     // Linked through the link table (JitArm64_Aot.cpp, "Links"): out of time, do_timing; else the
-    // entry of `destination`'s slot, its block's code or the dispatcher's lookup.
+    // code in `destination`'s slot, its block's or its stub, which sets DISPATCHER_PC and looks
+    // the block up.
     const u32 k = AotLinkSlot(destination);
-    MOVI2R(DISPATCHER_PC, destination);
     if (k == UINT32_MAX)  // the table is full: the dispatcher's lookup
     {
+      MOVI2R(DISPATCHER_PC, destination);
       B(dispatcher);
       return;
     }
@@ -568,6 +569,7 @@ void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return
     LDR(IndexType::Unsigned, ARM64Reg::X30, ARM64Reg::X30, k % JitArm64Aot::LINKS_GROUP * 8);
     BR(ARM64Reg::X30);
     SetJumpTarget(out_of_time);
+    MOVI2R(DISPATCHER_PC, destination);
     B(do_timing);
     return;
   }

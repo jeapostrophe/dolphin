@@ -366,6 +366,9 @@ protected:
   bool AssumesNoPairedQuantize() const;
   void AotLink(const JitBlock& block);
   void AotAllocLinks();
+  // Writes link k's stub at `at` (LINK_STUB_SIZE bytes), and sets its slot to its stub.
+  void AotWriteLinkStub(u8* at, u32 k);
+  const u8* AotLinkStub(u32 k) const;
   std::vector<u32> AotBlockHooks() const;
   void AotDumpCode(const char* what, const u8* code, size_t len);
   void AotReport();
