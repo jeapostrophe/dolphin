@@ -537,7 +537,10 @@ void JitArm64::AotInit()
     s_outcome = "refused " + cfg.image + ": " + why;
     fprintf(stderr, "JitArm64 AOT: %s\n", s_outcome.c_str());
     if (cfg.mode == Mode::Load)
-      std::exit(4);
+    {
+      fflush(stderr);
+      std::_Exit(4);
+    }
     AotStartInterpreter();
     m_aot_refused = true;
     return;
@@ -720,7 +723,8 @@ void JitArm64::AotMiss(u32 em_address)
     fprintf(stderr, "JitArm64 AOT: miss at %08x (feature flags %x)\n", em_address,
             m_ppc_state.feature_flags);
     AotReport();
-    std::exit(5);
+    fflush(stderr);
+    std::_Exit(5);  // from the CPU thread: no static destructors under the other threads
   }
   m_aot->stats.interp_blocks++;
   m_aot_ci->AotExecuteOneBlock();
