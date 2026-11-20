@@ -3,6 +3,8 @@
 
 #include "Core/PowerPC/JitArm64/Jit.h"
 
+#include "Core/PowerPC/CachedInterpreter/CachedInterpreter.h"
+
 #include <array>
 
 #include "Common/Assert.h"
@@ -472,6 +474,29 @@ void JitArm64::DynaRunTable59(UGeckoInstruction inst)
 void JitArm64::DynaRunTable63(UGeckoInstruction inst)
 {
   (this->*s_dyna_op_table63[inst.SUBOP10])(inst);
+}
+
+u32 JitArm64::AotExitKind(const PPCAnalyst::CodeOp& op)
+{
+  const UGeckoInstruction inst = op.inst;
+  Instruction f = s_dyna_op_table[inst.OPCD];
+  if (f == &JitArm64::DynaRunTable4)
+    f = s_dyna_op_table4[inst.SUBOP10];
+  else if (f == &JitArm64::DynaRunTable19)
+    f = s_dyna_op_table19[inst.SUBOP10];
+  else if (f == &JitArm64::DynaRunTable31)
+    f = s_dyna_op_table31[inst.SUBOP10];
+  else if (f == &JitArm64::DynaRunTable59)
+    f = s_dyna_op_table59[inst.SUBOP5];
+  else if (f == &JitArm64::DynaRunTable63)
+    f = s_dyna_op_table63[inst.SUBOP10];
+  if (f == &JitArm64::FallBackToInterpreter || f == &JitArm64::rfi)
+    return CachedInterpreter::JIT_EXIT_EXCEPTIONS;
+  if (f == &JitArm64::mtmsr)
+    return CachedInterpreter::JIT_EXIT_EXTERNAL_EXCEPTIONS;
+  if (f == &JitArm64::dcbx)
+    return CachedInterpreter::JIT_EXIT_PLAIN | CachedInterpreter::JIT_OP_DCBX;
+  return CachedInterpreter::JIT_EXIT_PLAIN;
 }
 
 void JitArm64::CompileInstruction(PPCAnalyst::CodeOp& op)

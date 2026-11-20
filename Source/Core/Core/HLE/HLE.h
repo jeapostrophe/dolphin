@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include <string_view>
 
 #include "Common/CommonTypes.h"
@@ -69,6 +71,9 @@ void ExecuteFromJIT(u32 current_pc, u32 hook_index, Core::System& system);
 u32 GetHookByAddress(u32 address);
 // Returns the HLE hook index if the address matches the function start
 u32 GetHookByFunctionAddress(PPCSymbolDB& ppc_symbol_db, u32 address);
+// JitArm64's AOT emit: hook lookups answered from these (address -> hook index) alone, as a shape
+// run logged them where it compiled (an address not among them has no hook).
+void SetAotHookOverride(const std::unordered_map<u32, u32>* hooks);
 const char* GetHookNameByIndex(u32 index);
 HookType GetHookTypeByIndex(u32 index);
 HookFlag GetHookFlagsByIndex(u32 index);

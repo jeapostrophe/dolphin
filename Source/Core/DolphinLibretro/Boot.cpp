@@ -24,6 +24,9 @@
 #include "Core/HW/VideoInterface.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 #include "Core/PowerPC/PowerPC.h"
+#ifdef _M_ARM_64
+#include "Core/PowerPC/JitArm64/JitArm64_Aot.h"
+#endif
 #include "Core/System.h"
 #include "DolphinLibretro/Audio.h"
 #include "DolphinLibretro/Input.h"
@@ -44,6 +47,55 @@
 #include "VideoCommon/OnScreenDisplay.h"
 
 namespace fs = std::filesystem;
+
+#ifdef _M_ARM_64
+// JitArm64's AOT form (JitArm64_Aot.h; retro-trainer HH-34). The Mac's tooling names a mode in
+// DOLPHIN_AOT (shape, emit, load, interp), with DOLPHIN_AOT_IMAGE, DOLPHIN_AOT_LOG,
+// DOLPHIN_AOT_CORE_UUID and DOLPHIN_AOT_CORRUPT; otherwise the frontend's rt_aot_image option
+// names an image, run in interp. Either runs JitArm64, which in load and interp maps no code, on
+// the software vertex loader (the vertex loader JIT is the other writer of code).
+static void ConfigureAot()
+{
+  JitArm64Aot::Settings settings;
+  const char* mode = getenv("DOLPHIN_AOT");
+  if (mode && *mode)
+  {
+    if (!JitArm64Aot::ParseMode(mode, &settings.mode))
+    {
+      fprintf(stderr, "DOLPHIN_AOT=%s is none of shape, emit, load, interp\n", mode);
+      std::exit(2);
+    }
+    auto env = [](const char* name) {
+      const char* v = getenv(name);
+      return std::string(v ? v : "");
+    };
+    settings.image = env("DOLPHIN_AOT_IMAGE");
+    settings.log = env("DOLPHIN_AOT_LOG");
+    settings.core_uuid = env("DOLPHIN_AOT_CORE_UUID");
+    settings.corrupt = static_cast<u32>(strtoul(env("DOLPHIN_AOT_CORRUPT").c_str(), nullptr, 16));
+  }
+  else
+  {
+    retro_variable var{"rt_aot_image", nullptr};
+    if (Libretro::environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && *var.value)
+    {
+      settings.mode = JitArm64Aot::Mode::Interp;
+      settings.image = var.value;
+    }
+  }
+  JitArm64Aot::Configure(settings);
+  if (settings.mode == JitArm64Aot::Mode::Off)
+    return;
+  Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::JITARM64);
+  Config::SetBase(Config::MAIN_FASTMEM, false);
+  Config::SetBase(Config::MAIN_FASTMEM_ARENA, false);
+  Config::SetBase(Config::MAIN_LARGE_ENTRY_POINTS_MAP, false);
+  Config::SetBase(Config::GFX_VERTEX_LOADER_TYPE, VertexLoaderType::Software);
+  // FPSCR's result flags as the interpreter computes them, so a block the image lacks, run on the
+  // Cached Interpreter, leaves FPSCR as the image's code would
+  Config::SetBase(Config::MAIN_FPRF, true);
+}
+#endif
 
 namespace Libretro
 {
@@ -611,6 +663,9 @@ bool retro_load_game(const struct retro_game_info* game)
 
     OSD::AddMessage("CPU: Just in time compiler disabled as unavailable on your system", OSD::Duration::NORMAL);
   }
+#endif
+#ifdef _M_ARM_64
+  ConfigureAot();
 #endif
   NOTICE_LOG_FMT(BOOT, "CPU Core: {}", Libretro::Options::CPUCoreToString(Config::Get(Config::MAIN_CPU_CORE)));
   NOTICE_LOG_FMT(BOOT, "Fastmem enabled = {}", (Config::Get(Config::MAIN_FASTMEM)) ? "Yes" : "No");

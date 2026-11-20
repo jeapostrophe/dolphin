@@ -532,6 +532,14 @@ u32 MMU::Read_Opcode(u32 address)
 
 TryReadInstResult MMU::TryReadInstruction(u32 address)
 {
+  if (m_aot_fetch)
+  {
+    const auto it = m_aot_fetch->find(address);
+    if (it == m_aot_fetch->end())
+      return TryReadInstResult{false, false, 0, 0};
+    return TryReadInstResult{true, true, it->second, address};
+  }
+
   bool from_bat = true;
   if (m_ppc_state.msr.IR)
   {

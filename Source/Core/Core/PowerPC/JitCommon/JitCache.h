@@ -184,6 +184,9 @@ public:
 
   void InvalidateICache(u32 address, u32 length, bool forced);
   void InvalidateICacheLine(u32 address);
+  // JitArm64's AOT interp: the Cached Interpreter's cache, which runs the image's misses, is
+  // cleared and invalidated with this one.
+  void SetShadowCache(JitBaseBlockCache* shadow) { m_aot_shadow = shadow; }
   void ErasePhysicalRange(u32 address, u32 length);
   void EraseSingleBlock(const JitBlock& block);
 
@@ -193,6 +196,7 @@ protected:
   virtual void DestroyBlock(JitBlock& block);
 
   JitBase& m_jit;
+  JitBaseBlockCache* m_aot_shadow = nullptr;
 
 private:
   virtual void WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest) = 0;

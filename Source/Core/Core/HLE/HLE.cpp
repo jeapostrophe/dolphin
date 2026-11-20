@@ -186,8 +186,20 @@ u32 GetHookByAddress(u32 address)
   return (iter != s_hooked_addresses.end()) ? iter->second : 0;
 }
 
+static const std::unordered_map<u32, u32>* s_aot_hooks = nullptr;
+
+void SetAotHookOverride(const std::unordered_map<u32, u32>* hooks)
+{
+  s_aot_hooks = hooks;
+}
+
 u32 GetHookByFunctionAddress(PPCSymbolDB& ppc_symbol_db, u32 address)
 {
+  if (s_aot_hooks)
+  {
+    const auto it = s_aot_hooks->find(address);
+    return it == s_aot_hooks->end() ? 0 : it->second;
+  }
   const u32 index = GetHookByAddress(address);
   // Fixed hooks use a fixed address and don't patch the whole function
   if (index == 0 || os_patches[index].flags == HookFlag::Fixed)

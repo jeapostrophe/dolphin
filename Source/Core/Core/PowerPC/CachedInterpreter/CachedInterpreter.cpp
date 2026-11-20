@@ -3,6 +3,7 @@
 
 #include "Core/PowerPC/CachedInterpreter/CachedInterpreter.h"
 
+#include <algorithm>
 #include <span>
 #include <sstream>
 #include <utility>
@@ -39,6 +40,13 @@ void CachedInterpreter::Init()
   ResetFreeMemoryRanges();
 
   jo.enableBlocklink = false;
+  if (m_jit_timed)
+  {
+    // JitArm64::SetOptimizationEnabled(true)'s options: its blocks are these
+    analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
+    analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CARRY_MERGE);
+    analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_BRANCH_FOLLOW);
+  }
 
   m_block_cache.Init();
 
@@ -110,6 +118,64 @@ void CachedInterpreter::SingleStep()
   // Enter new timing slice
   m_system.GetCoreTiming().Advance();
   ExecuteOneBlock();
+}
+
+s32 CachedInterpreter::EndBlockIfBranched(PowerPC::PowerPCState& ppc_state,
+                                          const EndBlockIfBranchedOperands& operands)
+{
+  if (ppc_state.npc == operands.next_pc)
+    return sizeof(AnyCallback) + sizeof(operands);
+  ppc_state.pc = ppc_state.npc;
+  ppc_state.downcount -= operands.downcount;
+  PowerPC::UpdatePerformanceMonitor(operands.downcount, operands.num_load_stores,
+                                    operands.num_fp_inst, ppc_state);
+  return 0;
+}
+
+// JitArm64::dcbx's loop: as many of a dcbx/addi/bdnz loop's iterations at once as the downcount
+// allows (CTR, rB and the downcount left as if they had run, the last one's addi and bdnz to come),
+// each line's dcbx as the interpreter does it.
+s32 CachedInterpreter::DcbxLoop(PowerPC::PowerPCState& ppc_state, const DcbxLoopOperands& operands)
+{
+  u32 extra = 0;
+  if (ppc_state.downcount > 0)
+  {
+    const u32 ctr = CTR(ppc_state);
+    const u32 by_downcount = static_cast<u32>(ppc_state.downcount / static_cast<s32>(operands.cycles_per_loop));
+    extra = std::min(by_downcount, ctr - 1);
+    CTR(ppc_state) = ctr - extra;
+    ppc_state.downcount -= static_cast<s32>(extra * operands.cycles_per_loop);
+  }
+  const u32 rb = ppc_state.gpr[operands.rb];
+  for (u32 k = 0; k <= extra; k++)
+  {
+    ppc_state.gpr[operands.rb] = rb + 32 * k;
+    operands.func(operands.interpreter, operands.inst);
+  }
+  return sizeof(AnyCallback) + sizeof(operands);
+}
+
+// JitArm64's WriteExceptionExit: past a branch, the pending exceptions are taken before the
+// block is charged.
+template <bool external>
+s32 CachedInterpreter::EndBlockCheckExceptions(PowerPC::PowerPCState& ppc_state,
+                                               const EndBlockCheckExceptionsOperands& operands)
+{
+  if (operands.next_pc != 0 && ppc_state.npc == operands.next_pc)
+    return sizeof(AnyCallback) + sizeof(operands);
+  if (ppc_state.Exceptions != 0)
+  {
+    ppc_state.pc = ppc_state.npc;
+    if constexpr (external)
+      operands.power_pc.CheckExternalExceptions();
+    else
+      operands.power_pc.CheckExceptions();
+  }
+  ppc_state.pc = ppc_state.npc;
+  ppc_state.downcount -= operands.downcount;
+  PowerPC::UpdatePerformanceMonitor(operands.downcount, operands.num_load_stores,
+                                    operands.num_fp_inst, ppc_state);
+  return 0;
 }
 
 s32 CachedInterpreter::StartProfiledBlock(PowerPC::PowerPCState& ppc_state,
@@ -402,14 +468,69 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
       {
         const InterpretOperands operands = {interpreter, Interpreter::GetInterpreterOp(op.inst),
                                             js.compilerPC, op.inst};
-        Write(op.canEndBlock ? CallbackCast(Interpret<true>) : CallbackCast(Interpret<false>),
-              operands);
+        const PPCAnalyst::CodeOp* next = &op + 1;
+        if (m_jit_timed && (m_jit_op(op) & JIT_OP_DCBX) && op.inst.RA == 0 && op.inst.RB != 0 &&
+            CanMergeNextInstructions(2) && (next[0].inst.hex & 0xfc00'ffff) == 0x38000020 &&
+            next[0].inst.RA_6 == op.inst.RB && next[0].inst.RD_2 == op.inst.RB &&
+            next[1].inst.hex == 0x4200fff8)
+        {
+          Write(DcbxLoop, {operands, op.inst.RB,
+                           static_cast<u32>(op.opinfo->num_cycles + next[0].opinfo->num_cycles +
+                                            next[1].opinfo->num_cycles)});
+        }
+        else
+        {
+          Write(op.canEndBlock ? CallbackCast(Interpret<true>) : CallbackCast(Interpret<false>),
+                operands);
+        }
       }
 
       if (op.branchIsIdleLoop)
         Write(CheckIdle, {m_system.GetCoreTiming(), js.blockStart});
-      if (op.canEndBlock)
+      const u32 exit_kind =
+          m_jit_timed && op.canEndBlock ?
+              (op.branchIsIdleLoop ? u32{JIT_EXIT_EXCEPTIONS} : m_jit_op(op) & JIT_EXIT_MASK) :
+              u32{JIT_EXIT_PLAIN};
+      if (exit_kind != JIT_EXIT_PLAIN)
+      {
+        // JitArm64's FallBackToInterpreter goes on past an op that left npc at the next word
+        const u32 next_pc = js.instructionsLeft == 0 ? 0 : op.address + 4;
+        const EndBlockCheckExceptionsOperands operands = {
+            {js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst},
+            m_system.GetPowerPC(),
+            next_pc};
+        Write(exit_kind == JIT_EXIT_EXTERNAL_EXCEPTIONS ?
+                  CallbackCast(EndBlockCheckExceptions<true>) :
+                  CallbackCast(EndBlockCheckExceptions<false>),
+              operands);
+      }
+      else if (op.canEndBlock && m_jit_timed && js.instructionsLeft > 0)
+      {
+        // Not the block's last op: an unconditional branch here is one the analyzer followed,
+        // which JitArm64 compiles to no exit at all; anything else (a conditional branch, a trap)
+        // leaves the block only where it went elsewhere than the next word.
+        const bool followed = op.inst.OPCD == 18 || (op.inst.OPCD == 16 && (op.inst.BO & 0x14) == 0x14);
+        if (!followed)
+        {
+          Write(EndBlockIfBranched,
+                {{js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst},
+                 op.address + 4});
+        }
+      }
+      else if (op.canEndBlock)
+      {
         WriteEndBlock();
+      }
+
+      // JitArm64::dcbt: a dcbst of the same address right after it is skipped (no invalidation,
+      // and its cycles never charged)
+      if (m_jit_timed && op.inst.OPCD == 31 && op.inst.SUBOP10 == 278 &&
+          CanMergeNextInstructions(1) && js.op[1].inst.OPCD == 31 &&
+          js.op[1].inst.SUBOP10 == 54 && js.op[1].inst.RA == op.inst.RA &&
+          js.op[1].inst.RB == op.inst.RB)
+      {
+        i++;
+      }
     }
   }
   if (code_block.m_broken)

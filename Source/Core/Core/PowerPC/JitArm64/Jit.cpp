@@ -31,6 +31,7 @@
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/Host.h"
 #include "Core/PatchEngine.h"
+#include "Core/PowerPC/CachedInterpreter/CachedInterpreter.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 #include "Core/PowerPC/JitArm64/JitArm64_RegCache.h"
 #include "Core/PowerPC/JitCommon/ConstantPropagation.h"
@@ -56,17 +57,16 @@ JitArm64::JitArm64(Core::System& system)
 
 JitArm64::~JitArm64() = default;
 
-void JitArm64::Init()
+void JitArm64::AllocCodeRegions(bool executable)
 {
-  InitFastmemArena();
-
-  RefreshConfig();
-
   // We want the regions to be laid out in this order in memory:
   // m_far_code_0, m_near_code_0, m_near_code_1, m_far_code_1.
   // AddChildCodeSpace grabs space from the end of the parent region,
   // so we have to call AddChildCodeSpace in reverse order.
-  AllocCodeSpace(TOTAL_CODE_SIZE);
+  if (executable)
+    AllocCodeSpace(TOTAL_CODE_SIZE);
+  else
+    AllocCodeSpaceWritable(TOTAL_CODE_SIZE);
   AddChildCodeSpace(&m_far_code_1, FAR_CODE_SIZE);
   AddChildCodeSpace(&m_near_code_1, NEAR_CODE_SIZE);
   AddChildCodeSpace(&m_near_code_0, NEAR_CODE_SIZE);
@@ -74,6 +74,21 @@ void JitArm64::Init()
   ASSERT(m_far_code_0.GetCodeEnd() == m_near_code_0.GetCodePtr());
   ASSERT(m_near_code_0.GetCodeEnd() == m_near_code_1.GetCodePtr());
   ASSERT(m_near_code_1.GetCodeEnd() == m_far_code_1.GetCodePtr());
+}
+
+void JitArm64::Init()
+{
+  if (JitArm64Aot::Active())
+  {
+    AotInit();
+    return;
+  }
+
+  InitFastmemArena();
+
+  RefreshConfig();
+
+  AllocCodeRegions(true);
 
   jo.optimizeGatherPipe = true;
   SetBlockLinkingEnabled(true);
@@ -93,7 +108,7 @@ void JitArm64::Init()
 
 void JitArm64::SetBlockLinkingEnabled(bool enabled)
 {
-  jo.enableBlocklink = enabled && !SConfig::GetInstance().bJITNoBlockLinking;
+  jo.enableBlocklink = enabled && !SConfig::GetInstance().bJITNoBlockLinking && !m_aot;
 }
 
 void JitArm64::SetOptimizationEnabled(bool enabled)
@@ -168,6 +183,17 @@ bool JitArm64::HandleFault(uintptr_t access_address, SContext* ctx)
 
 void JitArm64::ClearCache()
 {
+  if (m_aot && !GetRegionPtr())
+  {
+    // load, interp: no code cache; the image's blocks are installed again as they are reached
+    blocks.Clear();
+    blocks.ClearRangesToFree();
+    if (m_aot_ci)
+      m_aot_ci->ClearCache();
+    RefreshConfig();
+    return;
+  }
+
   m_fault_to_handler.clear();
 
   blocks.Clear();
@@ -190,10 +216,14 @@ void JitArm64::GenerateAsmAndResetFreeMemoryRanges()
   const u8* routines_near_start = GetCodePtr();
   const u8* routines_far_start = m_far_code.GetCodePtr();
 
+  if (m_aot)
+    m_aot->imports.unit_begin = routines_near_start;
   GenerateAsm();
 
   const u8* routines_near_end = GetCodePtr();
   const u8* routines_far_end = m_far_code.GetCodePtr();
+  if (m_aot)
+    AotRoutinesGenerated(routines_near_start, routines_near_end);
 
   ResetFreeMemoryRanges(routines_near_end - routines_near_start,
                         routines_far_end - routines_far_start);
@@ -248,9 +278,12 @@ void JitArm64::ResetFreeMemoryRanges(size_t routines_near_size, size_t routines_
 
 void JitArm64::Shutdown()
 {
+  if (m_aot)
+    AotShutdown();
   auto& memory = m_system.GetMemory();
   memory.ShutdownFastmemArena();
-  FreeCodeSpace();
+  if (GetRegionPtr())
+    FreeCodeSpace();
   blocks.Shutdown();
 }
 
@@ -516,6 +549,14 @@ void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return
                      js.downcountAmount);
   }
   DoDownCount();
+
+  if (m_aot)
+  {
+    // No link: the exit goes to the dispatcher, which reads the flags DoDownCount set.
+    MOVI2R(DISPATCHER_PC, destination);
+    B(dispatcher);
+    return;
+  }
 
   LK &= m_enable_blr_optimization;
 
@@ -925,22 +966,50 @@ void JitArm64::DumpCode(const u8* start, const u8* end)
 
 void JitArm64::Run()
 {
+  if (m_aot_refused)
+  {
+    m_aot_ci->Run();
+    return;
+  }
+  // emit's code cache is not executable: it compiles the log where the JIT would start running
+  if (m_aot && m_aot->mode == JitArm64Aot::Mode::Emit)
+    AotEmit();
   ProtectStack();
   m_system.GetJitInterface().UpdateMembase();
 
-  CompiledCode pExecAddr = (CompiledCode)enter_code;
-  pExecAddr();
+  if (m_aot)
+  {
+    // The AOT form's enter_code takes the PowerPCState (PPC_REG) as its argument.
+    reinterpret_cast<void (*)(PowerPC::PowerPCState*)>(const_cast<u8*>(enter_code))(&m_ppc_state);
+  }
+  else
+  {
+    CompiledCode pExecAddr = (CompiledCode)enter_code;
+    pExecAddr();
+  }
 
   UnprotectStack();
 }
 
 void JitArm64::SingleStep()
 {
+  if (m_aot_refused)
+  {
+    m_aot_ci->SingleStep();
+    return;
+  }
   ProtectStack();
   m_system.GetJitInterface().UpdateMembase();
 
-  CompiledCode pExecAddr = (CompiledCode)enter_code;
-  pExecAddr();
+  if (m_aot)
+  {
+    reinterpret_cast<void (*)(PowerPC::PowerPCState*)>(const_cast<u8*>(enter_code))(&m_ppc_state);
+  }
+  else
+  {
+    CompiledCode pExecAddr = (CompiledCode)enter_code;
+    pExecAddr();
+  }
 
   UnprotectStack();
 }
@@ -978,6 +1047,15 @@ void JitArm64::Jit(u32 em_address)
 
 void JitArm64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 {
+  if (m_aot)
+  {
+    if (m_aot->mode == JitArm64Aot::Mode::Load || m_aot->mode == JitArm64Aot::Mode::Interp)
+    {
+      AotMiss(em_address);
+      return;
+    }
+  }
+
   CleanUpAfterStackFault();
 
   if (SConfig::GetInstance().bJITNoBlockCache)
@@ -1030,6 +1108,11 @@ void JitArm64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   {
     u8* near_start = GetWritableCodePtr();
     u8* far_start = m_far_code.GetWritableCodePtr();
+    if (m_aot)
+    {
+      m_aot->imports.unit_begin = near_start;
+      m_aot->imports.unresolved_in_unit = 0;
+    }
 
     JitBlock* b = blocks.AllocateBlock(em_address);
     if (DoJit(em_address, b, nextPC))
@@ -1058,6 +1141,12 @@ void JitArm64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
       b->far_end = far_end;
 
       blocks.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
+      if (m_aot)
+      {
+        m_aot_last_block = b;
+        if (m_aot->log)
+          AotLogBlock(*b);
+      }
 
 #ifdef JIT_LOG_GENERATED_CODE
       LogGeneratedCode();
@@ -1176,7 +1265,8 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
   if (IsProfilingEnabled())
     ABI_CallFunction(&JitBlock::ProfileData::BeginProfiling, b->profile_data.get());
 
-  if (code_block.m_gqr_used.Count() == 1 && !js.pairedQuantizeAddresses.contains(js.blockStart))
+  if (!m_aot && code_block.m_gqr_used.Count() == 1 &&
+      !js.pairedQuantizeAddresses.contains(js.blockStart))
   {
     int gqr = *code_block.m_gqr_used.begin();
     if (!code_block.m_gqr_modified[gqr] && !GQR(m_ppc_state, gqr))
@@ -1202,7 +1292,7 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
   m_constant_propagation.Clear();
 
-  if (!js.noSpeculativeConstantsAddresses.contains(js.blockStart))
+  if (!m_aot && !js.noSpeculativeConstantsAddresses.contains(js.blockStart))
   {
     IntializeSpeculativeConstants();
   }

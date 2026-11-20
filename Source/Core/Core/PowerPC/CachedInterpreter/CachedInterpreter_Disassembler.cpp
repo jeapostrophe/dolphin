@@ -82,6 +82,30 @@ s32 CachedInterpreter::CheckBreakpoint(std::ostream& stream, const CheckHaltOper
   return sizeof(AnyCallback) + sizeof(operands);
 }
 
+s32 CachedInterpreter::EndBlockIfBranched(std::ostream& stream,
+                                          const EndBlockIfBranchedOperands& operands)
+{
+  fmt::println(stream, "EndBlockIfBranched(next_pc=0x{:08x}, downcount={})", operands.next_pc,
+               operands.downcount);
+  return sizeof(AnyCallback) + sizeof(operands);
+}
+
+s32 CachedInterpreter::DcbxLoop(std::ostream& stream, const DcbxLoopOperands& operands)
+{
+  fmt::println(stream, "DcbxLoop(current_pc=0x{:08x}, inst=0x{:08x}, rb={}, cycles_per_loop={})",
+               operands.current_pc, operands.inst.hex, operands.rb, operands.cycles_per_loop);
+  return sizeof(AnyCallback) + sizeof(operands);
+}
+
+template <bool external>
+s32 CachedInterpreter::EndBlockCheckExceptions(std::ostream& stream,
+                                               const EndBlockCheckExceptionsOperands& operands)
+{
+  fmt::println(stream, "EndBlockCheckExceptions<external={}>(next_pc=0x{:08x}, downcount={})",
+               external, operands.next_pc, operands.downcount);
+  return sizeof(AnyCallback) + sizeof(operands);
+}
+
 s32 CachedInterpreter::CheckIdle(std::ostream& stream, const CheckIdleOperands& operands)
 {
   const auto& [core_timing, idle_pc] = operands;
@@ -114,6 +138,10 @@ std::size_t CachedInterpreter::Disassemble(const JitBlock& block, std::ostream& 
       LOOKUP_KV(CachedInterpreter::CheckFPU),
       LOOKUP_KV(CachedInterpreter::CheckBreakpoint),
       LOOKUP_KV(CachedInterpreter::CheckIdle),
+      LOOKUP_KV(CachedInterpreter::EndBlockIfBranched),
+      LOOKUP_KV(CachedInterpreter::EndBlockCheckExceptions<false>),
+      LOOKUP_KV(CachedInterpreter::EndBlockCheckExceptions<true>),
+      LOOKUP_KV(CachedInterpreter::DcbxLoop),
   });
 
 #undef LOOKUP_KV

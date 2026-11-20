@@ -141,7 +141,7 @@ void JitBase::RefreshConfig()
 
   bool any_watchpoints = m_system.GetPowerPC().GetMemChecks().HasAny();
   jo.fastmem = m_fastmem_enabled && jo.fastmem_arena && (m_ppc_state.msr.DR || !any_watchpoints) &&
-               EMM::IsExceptionHandlerSupported();
+               EMM::IsExceptionHandlerSupported() && !m_aot_form;
   jo.memcheck = m_system.IsMMUMode() || m_system.IsPauseOnPanicMode() || any_watchpoints;
   jo.fp_exceptions = m_enable_float_exceptions;
   jo.div_by_zero_exceptions = m_enable_div_by_zero_exceptions;
@@ -279,7 +279,11 @@ void JitBase::CleanUpAfterStackFault()
 
 bool JitBase::CanMergeNextInstructions(int count) const
 {
-  if (m_system.GetCPU().IsStepping() || js.instructionsLeft < count)
+  // The AOT form's code may not depend on when it was compiled: stepping makes blocks of one
+  // instruction only while debugging.
+  if ((!m_aot_form || IsDebuggingEnabled()) && m_system.GetCPU().IsStepping())
+    return false;
+  if (js.instructionsLeft < count)
     return false;
   // Be careful: a breakpoint kills flags in between instructions
   for (int i = 1; i <= count; i++)

@@ -663,6 +663,8 @@ elseif(_M_ARM_64)
     PowerPC/JitArm64/Jit.h
     PowerPC/JitArm64/JitAsm.cpp
     PowerPC/JitArm64/JitArm64Cache.cpp
+    PowerPC/JitArm64/JitArm64_Aot.cpp
+    PowerPC/JitArm64/JitArm64_Aot.h
     PowerPC/JitArm64/JitArm64_BackPatch.cpp
     PowerPC/JitArm64/JitArm64_Branch.cpp
     PowerPC/JitArm64/JitArm64_FloatingPoint.cpp

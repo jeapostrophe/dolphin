@@ -45,7 +45,10 @@ void JitArm64::GenerateAsm()
   ABI_PushRegisters(regs_to_save);
   m_float_emit.ABI_PushRegisters(regs_to_save_fpr, ARM64Reg::X8);
 
-  MOVP2R(PPC_REG, &m_ppc_state);
+  if (m_aot)
+    MOV(PPC_REG, ARM64Reg::X0);  // JitArm64::Run passes it: the AOT form holds no address
+  else
+    MOVP2R(PPC_REG, &m_ppc_state);
 
   // Store the stack pointer, so we can reset it if the BLR optimization fails.
   ADD(ARM64Reg::X8, ARM64Reg::SP, 0);
@@ -179,16 +182,31 @@ void JitArm64::GenerateAsm()
 
   // Call JIT
   ResetStack();
-  ABI_CallFunction(&JitTrampoline, this, DISPATCHER_PC);
+  if (m_aot)
+    ABI_CallFunction(&JitArm64::AotMissTrampoline, this, DISPATCHER_PC);
+  else
+    ABI_CallFunction(&JitTrampoline, this, DISPATCHER_PC);
 
   LDR(IndexType::Unsigned, DISPATCHER_PC, PPC_REG, PPCSTATE_OFF(pc));
 
   // If jitting triggered an ISI exception, MSR.DR may have changed
   EmitUpdateMembase();
 
+  // The AOT form's miss may have run a block on the Cached Interpreter, which charged it: the
+  // timing check a compiled block's exit gets.
+  FixupBranch aot_timing;
+  if (m_aot)
+  {
+    LDR(IndexType::Unsigned, ARM64Reg::W8, PPC_REG, PPCSTATE_OFF(downcount));
+    CMP(ARM64Reg::W8, 0);
+    aot_timing = B(CC_LE);
+  }
+
   B(dispatcher_no_check);
 
   SetJumpTarget(bail);
+  if (m_aot)
+    SetJumpTarget(aot_timing);
   do_timing = GetCodePtr();
   // Write the current PC out to PPCSTATE
   static_assert(PPCSTATE_OFF(pc) <= 252);
@@ -792,8 +810,16 @@ void JitArm64::GenerateQuantizedLoads()
 
   Common::JitRegister::Register(start, GetCodePtr(), "JIT_QuantizedLoad");
 
-  paired_load_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
-  ReserveCodeSpace(8 * sizeof(u8*));
+  if (m_aot)
+  {
+    // A table of code pointers is data: outside the code, so the code holds no address
+    paired_load_quantized = AotQuantizedTable(0);
+  }
+  else
+  {
+    paired_load_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
+    ReserveCodeSpace(8 * sizeof(u8*));
+  }
 
   paired_load_quantized[0] = loadPairedFloatTwo;
   paired_load_quantized[1] = loadPairedIllegal;
@@ -804,8 +830,16 @@ void JitArm64::GenerateQuantizedLoads()
   paired_load_quantized[6] = loadPairedS8Two;
   paired_load_quantized[7] = loadPairedS16Two;
 
-  single_load_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
-  ReserveCodeSpace(8 * sizeof(u8*));
+  if (m_aot)
+  {
+    // A table of code pointers is data: outside the code, so the code holds no address
+    single_load_quantized = AotQuantizedTable(1);
+  }
+  else
+  {
+    single_load_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
+    ReserveCodeSpace(8 * sizeof(u8*));
+  }
 
   single_load_quantized[0] = loadPairedFloatOne;
   single_load_quantized[1] = loadPairedIllegal;
@@ -1012,8 +1046,16 @@ void JitArm64::GenerateQuantizedStores()
 
   Common::JitRegister::Register(start, GetCodePtr(), "JIT_QuantizedStore");
 
-  paired_store_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
-  ReserveCodeSpace(8 * sizeof(u8*));
+  if (m_aot)
+  {
+    // A table of code pointers is data: outside the code, so the code holds no address
+    paired_store_quantized = AotQuantizedTable(2);
+  }
+  else
+  {
+    paired_store_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
+    ReserveCodeSpace(8 * sizeof(u8*));
+  }
 
   paired_store_quantized[0] = storePairedFloat;
   paired_store_quantized[1] = storePairedIllegal;
@@ -1024,8 +1066,16 @@ void JitArm64::GenerateQuantizedStores()
   paired_store_quantized[6] = storePairedS8;
   paired_store_quantized[7] = storePairedS16;
 
-  single_store_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
-  ReserveCodeSpace(8 * sizeof(u8*));
+  if (m_aot)
+  {
+    // A table of code pointers is data: outside the code, so the code holds no address
+    single_store_quantized = AotQuantizedTable(3);
+  }
+  else
+  {
+    single_store_quantized = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
+    ReserveCodeSpace(8 * sizeof(u8*));
+  }
 
   single_store_quantized[0] = storeSingleFloat;
   single_store_quantized[1] = storePairedIllegal;

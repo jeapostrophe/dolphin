@@ -51,6 +51,17 @@ public:
   CodeBlock& operator=(CodeBlock&&) = delete;
 
   // Call this before you generate any code.
+  // A region of plain read-write memory, for code that is written and never executed here
+  // (JitArm64's AOT emit).
+  void AllocCodeSpaceWritable(size_t size)
+  {
+    region_size = size;
+    total_region_size = size;
+    region = static_cast<u8*>(Common::AllocateMemoryPages(total_region_size));
+    T::SetCodePtr(region, region + size);
+    T::SetWritableRegionDiff(0);
+  }
+
   void AllocCodeSpace(size_t size)
   {
     region_size = size;

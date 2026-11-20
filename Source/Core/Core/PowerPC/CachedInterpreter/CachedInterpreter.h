@@ -57,6 +57,36 @@ public:
   const char* GetName() const override { return "Cached Interpreter"; }
   const CommonAsmRoutinesBase* GetAsmRoutines() override { return nullptr; }
 
+  // JitArm64's AOT interp runs the blocks its image lacks here, charged as JitArm64 charges them
+  // (retro-trainer HH-34): blocks formed with the JIT's analyzer options, and a block that goes on
+  // past a branch (a followed one, or a conditional one not taken) ends only where JitArm64's
+  // would, when the branch goes elsewhere than the next word. Set before Init.
+  // `jit_op` says what JitArm64 makes of an op: how it leaves a block after one that can end
+  // it (JIT_EXIT_MASK: a plain exit, one that first takes every pending exception, or external
+  // ones only), and whether it is its dcbx, which runs a dcbx/addi/bdnz loop's iterations at once.
+  enum JitOp : u32
+  {
+    JIT_EXIT_PLAIN,
+    JIT_EXIT_EXCEPTIONS,
+    JIT_EXIT_EXTERNAL_EXCEPTIONS,
+    JIT_EXIT_MASK = 3,
+    JIT_OP_DCBX = 4,
+  };
+  void SetJitTimed(bool jit_timed, u32 (*jit_op)(const PPCAnalyst::CodeOp& op))
+  {
+    m_jit_timed = jit_timed;
+    m_aot_form = jit_timed;  // and flag merging, as there, never depends on stepping
+    m_jit_op = jit_op;
+  }
+  bool AotHasBlock() { return m_block_cache.Dispatch() != nullptr; }
+  // One block, from the cache or compiled now, at the PC (what Run does between timing checks).
+  void AotExecuteOneBlock()
+  {
+    if (!m_block_cache.Dispatch())
+      Jit(m_ppc_state.pc);
+    ExecuteOneBlock();
+  }
+
 private:
   void ExecuteOneBlock();
 
@@ -81,6 +111,9 @@ private:
   struct WriteBrokenBlockNPCOperands;
   struct CheckHaltOperands;
   struct CheckIdleOperands;
+  struct EndBlockIfBranchedOperands;
+  struct EndBlockCheckExceptionsOperands;
+  struct DcbxLoopOperands;
 
   static s32 StartProfiledBlock(PowerPC::PowerPCState& ppc_state,
                                 const StartProfiledBlockOperands& operands);
@@ -110,6 +143,22 @@ private:
   static s32 CheckBreakpoint(std::ostream& stream, const CheckHaltOperands& operands);
   static s32 CheckIdle(PowerPC::PowerPCState& ppc_state, const CheckIdleOperands& operands);
   static s32 CheckIdle(std::ostream& stream, const CheckIdleOperands& operands);
+  static s32 EndBlockIfBranched(PowerPC::PowerPCState& ppc_state,
+                                const EndBlockIfBranchedOperands& operands);
+  static s32 EndBlockIfBranched(std::ostream& stream, const EndBlockIfBranchedOperands& operands);
+
+  template <bool external>
+  static s32 EndBlockCheckExceptions(PowerPC::PowerPCState& ppc_state,
+                                     const EndBlockCheckExceptionsOperands& operands);
+  template <bool external>
+  static s32 EndBlockCheckExceptions(std::ostream& stream,
+                                     const EndBlockCheckExceptionsOperands& operands);
+
+  static s32 DcbxLoop(PowerPC::PowerPCState& ppc_state, const DcbxLoopOperands& operands);
+  static s32 DcbxLoop(std::ostream& stream, const DcbxLoopOperands& operands);
+
+  bool m_jit_timed = false;
+  u32 (*m_jit_op)(const PPCAnalyst::CodeOp& op) = nullptr;
 
   Common::RangeSizeSet<u8*> m_free_ranges;
   CachedInterpreterBlockCache m_block_cache;
@@ -167,6 +216,26 @@ struct CachedInterpreter::CheckHaltOperands
   PowerPC::PowerPCManager& power_pc;
   u32 current_pc;
   u32 downcount;
+};
+
+struct CachedInterpreter::EndBlockIfBranchedOperands : CachedInterpreter::EndBlockOperands<false>
+{
+  u32 next_pc;
+  u32 : 32;
+};
+
+struct CachedInterpreter::EndBlockCheckExceptionsOperands
+    : CachedInterpreter::EndBlockOperands<false>
+{
+  PowerPC::PowerPCManager& power_pc;
+  u32 next_pc;  // 0: none (the block's last op), else the op the block goes on to unbranched
+  u32 : 32;
+};
+
+struct CachedInterpreter::DcbxLoopOperands : CachedInterpreter::InterpretOperands
+{
+  u32 rb;
+  u32 cycles_per_loop;
 };
 
 struct CachedInterpreter::CheckIdleOperands

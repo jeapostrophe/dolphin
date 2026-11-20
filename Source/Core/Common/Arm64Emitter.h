@@ -600,6 +600,26 @@ struct LogicalImm
   bool valid = false;
 };
 
+// The AOT form of the JIT's code (retro-trainer HH-34; Core/PowerPC/JitArm64/JitArm64_Aot.h): an
+// emitter with one attached emits no host address. A pointer is loaded from the import slot that
+// holds it, `LDR Rd, [base, #table_offset + 8 * slot]`; a branch to code outside the unit being
+// emitted (a block, or the shared routines) goes through its slot and X30; and MOVI2R never
+// chooses ADR or ADRP, so no constant depends on where the code sits.
+class AotImportResolver
+{
+public:
+  virtual ~AotImportResolver() = default;
+  // The slot holding `target`, or -1.
+  virtual int Slot(const void* target) const = 0;
+  // `target` has no slot: the code emitted for it holds a host address (what names the site).
+  virtual void Unresolved(const void* target, const char* what) = 0;
+
+  ARM64Reg base = ARM64Reg::INVALID_REG;
+  u32 table_offset = 0;
+  // A branch to [unit_begin, the emitter's code pointer] stays PC-relative.
+  const u8* unit_begin = nullptr;
+};
+
 class ARM64XEmitter
 {
   friend class ARM64FloatEmitter;
@@ -667,6 +687,11 @@ private:
   template <typename T>
   void MOVI2RImpl(ARM64Reg Rd, T imm);
 
+  AotImportResolver* m_aot = nullptr;
+  // The AOT form of a branch to `ptr` outside the unit, through X30; false when `ptr` is inside it
+  // (or no resolver is attached), and the caller emits the PC-relative branch.
+  bool AotBranch(const void* ptr, bool link, const char* what);
+
 protected:
   void Write32(u32 value);
 
@@ -693,6 +718,11 @@ public:
   void FlushIcacheSection(u8* start, u8* end);
 
   ptrdiff_t GetWritableRegionDiff() { return m_writable_region_diff; }
+
+  void SetAotResolver(AotImportResolver* aot) { m_aot = aot; }
+  AotImportResolver* GetAotResolver() const { return m_aot; }
+  // Rd = the pointer in `target`'s import slot (an unresolved target is reported and loaded whole).
+  void AotLoadImport(ARM64Reg Rd, const void* target, const char* what);
   void SetWritableRegionDiff(ptrdiff_t diff) { m_writable_region_diff = diff; }
 
   // Should be checked after a block of code has been generated to see if the code has been
@@ -1034,13 +1064,21 @@ public:
   void MOVP2R(ARM64Reg Rd, P* ptr)
   {
     ASSERT_MSG(DYNA_REC, Is64Bit(Rd), "Can't store pointers in 32-bit registers");
-    MOVI2R(Rd, reinterpret_cast<uintptr_t>(ptr));
+    if (m_aot && ptr)
+      AotLoadImport(Rd, reinterpret_cast<const void*>(ptr), "MOVP2R");
+    else
+      MOVI2R(Rd, reinterpret_cast<uintptr_t>(ptr));
   }
   template <class P>
   // Given an address, stores the page address into a register and returns the page-relative offset
   s32 MOVPage2R(ARM64Reg Rd, P* ptr)
   {
     ASSERT_MSG(DYNA_REC, Is64Bit(Rd), "Can't store pointers in 32-bit registers");
+    if (m_aot)
+    {
+      AotLoadImport(Rd, reinterpret_cast<const void*>(ptr), "MOVPage2R");
+      return 0;
+    }
     MOVI2R(Rd, reinterpret_cast<uintptr_t>(ptr) & ~0xFFFULL);
     return static_cast<s32>(reinterpret_cast<uintptr_t>(ptr) & 0xFFFULL);
   }

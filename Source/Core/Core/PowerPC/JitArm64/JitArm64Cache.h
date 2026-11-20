@@ -26,6 +26,13 @@ public:
 
   void ClearRangesToFree();
 
+  // JitArm64's AOT load: blocks whose code is in [begin, end) are the image's, never written.
+  void SetImageCode(const u8* begin, const u8* end)
+  {
+    m_image_begin = begin;
+    m_image_end = end;
+  }
+
   void WriteLinkBlock(Arm64Gen::ARM64XEmitter& emit, const JitBlock::LinkData& source,
                       const JitBlock* dest = nullptr);
 
@@ -36,6 +43,8 @@ private:
   void WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest) override;
   void WriteDestroyBlock(const JitBlock& block) override;
 
+  const u8* m_image_begin = nullptr;
+  const u8* m_image_end = nullptr;
   std::vector<std::pair<u8*, u8*>> m_ranges_to_free_on_next_codegen_near;
   std::vector<std::pair<u8*, u8*>> m_ranges_to_free_on_next_codegen_far;
 };

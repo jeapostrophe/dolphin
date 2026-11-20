@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <unordered_map>
 #include <set>
 #include <span>
 #include <string>
@@ -226,6 +227,9 @@ public:
   // Used by interpreter to read instructions, uses iCache
   u32 Read_Opcode(u32 address);
   TryReadInstResult TryReadInstruction(u32 address);
+  // JitArm64's AOT emit: instruction fetches answered from these words alone, as logged
+  // (an address not among them is not readable).
+  void SetAotFetchOverride(const std::unordered_map<u32, u32>* words) { m_aot_fetch = words; }
 
   template <std::unsigned_integral T>
   T Read(const u32 address);
@@ -369,6 +373,7 @@ private:
   std::map<u32, u32> m_added_readonly_mappings;
   std::map<u32, u32> m_added_readwrite_mappings;
 
+  const std::unordered_map<u32, u32>* m_aot_fetch = nullptr;
   BatTable m_ibat_table;
   BatTable m_dbat_table;
 };

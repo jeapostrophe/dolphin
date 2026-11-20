@@ -799,18 +799,62 @@ FixupBranch ARM64XEmitter::BL()
 }
 
 // Compare and Branch
+bool ARM64XEmitter::AotBranch(const void* ptr, bool link, const char* what)
+{
+  if (!m_aot)
+    return false;
+  const u8* target = static_cast<const u8*>(ptr);
+  if (m_aot->unit_begin && target >= m_aot->unit_begin && target <= m_code)
+    return false;
+  AotLoadImport(ARM64Reg::X30, ptr, what);
+  EncodeUnconditionalBranchInst(link ? 1 : 0, 0x1F, 0, 0, ARM64Reg::X30);
+  return true;
+}
+
+void ARM64XEmitter::AotLoadImport(ARM64Reg Rd, const void* target, const char* what)
+{
+  const int slot = m_aot->Slot(target);
+  if (slot < 0)
+  {
+    m_aot->Unresolved(target, what);
+    // MOVZ/MOVK only (m_aot keeps MOVI2R off ADR/ADRP): the code works, and its bytes differ
+    // from any other process's, so an emit refuses the block.
+    MOVI2R(EncodeRegTo64(Rd), reinterpret_cast<uintptr_t>(target));
+    return;
+  }
+  LDR(IndexType::Unsigned, EncodeRegTo64(Rd), m_aot->base,
+      static_cast<u32>(m_aot->table_offset + 8 * slot));
+}
+
+static bool AotOutsideUnit(const AotImportResolver* aot, const void* ptr, const u8* code)
+{
+  const u8* target = static_cast<const u8*>(ptr);
+  return aot && !(aot->unit_begin && target >= aot->unit_begin && target <= code);
+}
+
 void ARM64XEmitter::CBZ(ARM64Reg Rt, const void* ptr)
 {
+  if (AotOutsideUnit(m_aot, ptr, m_code))
+    m_aot->Unresolved(ptr, "CBZ");
   EncodeCompareBranchInst(0, Rt, ptr);
 }
 void ARM64XEmitter::CBNZ(ARM64Reg Rt, const void* ptr)
 {
+  if (AotOutsideUnit(m_aot, ptr, m_code))
+    m_aot->Unresolved(ptr, "CBNZ");
   EncodeCompareBranchInst(1, Rt, ptr);
 }
 
 // Conditional Branch
 void ARM64XEmitter::B(CCFlags cond, const void* ptr)
 {
+  if (AotOutsideUnit(m_aot, ptr, m_code))
+  {
+    // Not taken: over the two instructions that take it through the import slot.
+    Write32((0x54 << 24) | (MaskImm19(3) << 5) | (static_cast<u32>(cond) ^ 1));
+    if (AotBranch(ptr, false, "B.cond"))
+      return;
+  }
   s64 distance = (s64)ptr - (s64)m_code;
 
   distance >>= 2;
@@ -824,25 +868,39 @@ void ARM64XEmitter::B(CCFlags cond, const void* ptr)
 // Test and Branch
 void ARM64XEmitter::TBZ(ARM64Reg Rt, u8 bits, const void* ptr)
 {
+  if (AotOutsideUnit(m_aot, ptr, m_code))
+    m_aot->Unresolved(ptr, "TBZ");
   EncodeTestBranchInst(0, Rt, bits, ptr);
 }
 void ARM64XEmitter::TBNZ(ARM64Reg Rt, u8 bits, const void* ptr)
 {
+  if (AotOutsideUnit(m_aot, ptr, m_code))
+    m_aot->Unresolved(ptr, "TBNZ");
   EncodeTestBranchInst(1, Rt, bits, ptr);
 }
 
 // Unconditional Branch
 void ARM64XEmitter::B(const void* ptr)
 {
+  if (AotBranch(ptr, false, "B"))
+    return;
   EncodeUnconditionalBranchInst(0, ptr);
 }
 void ARM64XEmitter::BL(const void* ptr)
 {
+  if (AotBranch(ptr, true, "BL"))
+    return;
   EncodeUnconditionalBranchInst(1, ptr);
 }
 
 void ARM64XEmitter::QuickCallFunction(ARM64Reg scratchreg, const void* func)
 {
+  if (m_aot)
+  {
+    AotLoadImport(scratchreg, func, "call");
+    BLR(EncodeRegTo64(scratchreg));
+    return;
+  }
   s64 distance = (s64)func - (s64)m_code;
   distance >>= 2;  // Can only branch to opcode-aligned (4) addresses
   if (!IsInRangeImm26(distance))
@@ -1898,6 +1956,7 @@ void ARM64XEmitter::MOVI2RImpl(ARM64Reg Rd, T imm)
   const u64 adrp_base = (pc & ~0xFFF) + adrp_offset;
   const u64 adr_base = pc + adr_offset;
   if constexpr (sizeof(T) == 8)
+    if (!m_aot)
   {
     try_base(adrp_base, Approach::ADRPBase, false);
     try_base(adr_base, Approach::ADRBase, false);

@@ -58,7 +58,7 @@ void JitBaseBlockCache::Init()
 
   m_entry_points_ptr = nullptr;
 #if defined(_ARCH_64) && !defined(IPHONEOS)
-  if (Config::Get(Config::MAIN_LARGE_ENTRY_POINTS_MAP))
+  if (Config::Get(Config::MAIN_LARGE_ENTRY_POINTS_MAP) && !m_jit.IsAotForm())
     m_entry_points_ptr = static_cast<u8**>(m_entry_points_arena.Create(FAST_BLOCK_MAP_SIZE));
 #endif
 
@@ -76,6 +76,8 @@ void JitBaseBlockCache::Shutdown()
 // is full and when saving and loading states.
 void JitBaseBlockCache::Clear()
 {
+  if (m_aot_shadow)
+    m_aot_shadow->Clear();
 #if defined(_DEBUG) || defined(DEBUGFAST)
   Core::DisplayMessage("Clearing code cache.", 3000);
 #endif
@@ -267,6 +269,8 @@ const u8* JitBaseBlockCache::Dispatch()
 
 void JitBaseBlockCache::InvalidateICacheLine(u32 address)
 {
+  if (m_aot_shadow)
+    m_aot_shadow->InvalidateICacheLine(address);
   const u32 cache_line_address = address & ~0x1f;
   const auto translated = m_jit.m_mmu.JitCache_TranslateAddress(cache_line_address);
   if (translated.valid)
@@ -275,6 +279,8 @@ void JitBaseBlockCache::InvalidateICacheLine(u32 address)
 
 void JitBaseBlockCache::InvalidateICache(u32 initial_address, u32 initial_length, bool forced)
 {
+  if (m_aot_shadow)
+    m_aot_shadow->InvalidateICache(initial_address, initial_length, forced);
   u32 address = initial_address;
   u32 length = initial_length;
   while (length > 0)

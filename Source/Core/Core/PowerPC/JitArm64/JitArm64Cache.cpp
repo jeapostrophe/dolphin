@@ -97,6 +97,8 @@ void JitArm64BlockCache::WriteLinkBlock(const JitBlock::LinkData& source, const 
 
 void JitArm64BlockCache::WriteDestroyBlock(const JitBlock& block)
 {
+  if (block.normalEntry >= m_image_begin && block.normalEntry < m_image_end)
+    return;
   // Only clear the entry point as we might still be within this block.
   ARM64XEmitter emit(block.normalEntry, block.normalEntry + 4);
 

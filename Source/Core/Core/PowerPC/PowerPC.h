@@ -187,6 +187,13 @@ struct PowerPCState
   u32 pagetable_base = 0;
   u32 pagetable_mask = 0;
 
+#ifdef _M_ARM_64
+  // JitArm64's AOT form loads every host address it uses from here, off PPC_REG
+  // (JitArm64_Aot.h; retro-trainer HH-34). Within an LDR's reach of the struct's start.
+  static constexpr size_t AOT_IMPORT_SLOTS = 1024;
+  alignas(8) std::array<const void*, AOT_IMPORT_SLOTS> aot_imports{};
+#endif
+
   std::array<std::array<TLBEntry, TLB_SIZE / TLB_WAYS>, NUM_TLBS> tlb;
 
   InstructionCache iCache;

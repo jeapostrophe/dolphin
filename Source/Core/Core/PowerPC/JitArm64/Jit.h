@@ -5,12 +5,15 @@
 
 #include <cstddef>
 #include <map>
+#include <memory>
+#include <string>
 #include <optional>
 
 #include "Common/Arm64Emitter.h"
 #include "Common/RangeSizeSet.h"
 
 #include "Core/PowerPC/JitArm64/JitArm64Cache.h"
+#include "Core/PowerPC/JitArm64/JitArm64_Aot.h"
 #include "Core/PowerPC/JitArm64/JitArm64_RegCache.h"
 #include "Core/PowerPC/JitArmCommon/BackPatch.h"
 #include "Core/PowerPC/JitCommon/ConstantPropagation.h"
@@ -18,6 +21,7 @@
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/PPCAnalyst.h"
 
+class CachedInterpreter;
 class HostDisassembler;
 
 class JitArm64 : public JitBase, public Arm64Gen::ARM64CodeBlock, public CommonAsmRoutinesBase
@@ -204,9 +208,16 @@ protected:
 
   bool HandleFunctionHooking(u32 address);
 
-  // Simple functions to switch between near and far code emitting
+  // Simple functions to switch between near and far code emitting. The AOT form has no far code
+  // (a block's code must be one range): what would go there is emitted inline and branched over.
   void SwitchToFarCode()
   {
+    if (m_aot)
+    {
+      m_aot_far_skip = B();
+      m_in_far_code = true;
+      return;
+    }
     m_near_code = GetWritableCodePtr();
     m_near_code_end = GetWritableCodeEnd();
     m_near_code_write_failed = HasWriteFailed();
@@ -218,6 +229,12 @@ protected:
 
   void SwitchToNearCode()
   {
+    if (m_aot)
+    {
+      SetJumpTarget(m_aot_far_skip);
+      m_in_far_code = false;
+      return;
+    }
     m_far_code.SetCodePtrUnsafe(GetWritableCodePtr(), GetWritableCodeEnd(), HasWriteFailed());
     SetCodePtrUnsafe(m_near_code, m_near_code_end, m_near_code_write_failed);
     m_in_far_code = false;
@@ -293,6 +310,48 @@ protected:
                                            Arm64Gen::ARM64Reg tmp2);
 
   bool DoJit(u32 em_address, JitBlock* b, u32 nextPC);
+
+  // The AOT form (JitArm64_Aot.h, JitArm64_Aot.cpp; retro-trainer HH-34)
+  static void AotMissTrampoline(JitArm64& jit, u32 em_address);
+  // How this JIT leaves a block after `op` (CachedInterpreter::JitExit), for its interp misses.
+  static u32 AotExitKind(const PPCAnalyst::CodeOp& op);
+  void AllocCodeRegions(bool executable);
+  void AotInit();
+  void AotRegisterImports();
+  void AotFillImportTable();
+  void AotRegisterRoutines();
+  void AotBindRoutines(const u8* code, const u32* entries);
+  void AotRoutinesGenerated(const u8* begin, const u8* end);
+  u64 AotImportsHash() const;
+  u64 AotAbiHash() const;
+  bool AotHeader(u8* out, u32 nblocks, u32 code_size, const std::string& core_uuid) const;
+  bool AotOpenImage(const std::string& path, std::string* why);
+  void AotStartInterpreter();
+  void AotMiss(u32 em_address);
+  void AotLogBlock(const JitBlock& b);
+  std::vector<u32> AotBlockHooks() const;
+  void AotDumpCode(const char* what, const u8* code, size_t len);
+  void AotReport();
+  void AotShutdown();
+  [[noreturn]] void AotEmit();
+  const u8** AotQuantizedTable(int which);
+  // The constant-address specializations bake in what the BATs and MMIO map say at compile time;
+  // the AOT form never takes them.
+  bool AotIsOptimizableRAMAddress(u32 address, u32 access_size) const
+  {
+    return !m_aot && m_mmu.IsOptimizableRAMAddress(address, access_size);
+  }
+  u32 AotIsOptimizableMMIOAccess(u32 address, u32 access_size) const
+  {
+    return m_aot ? 0 : m_mmu.IsOptimizableMMIOAccess(address, access_size);
+  }
+
+  std::unique_ptr<JitArm64Aot::State> m_aot;
+  std::unique_ptr<CachedInterpreter> m_aot_ci;
+  bool m_aot_refused = false;
+  bool m_aot_emitting = false;
+  JitBlock* m_aot_last_block = nullptr;
+  Arm64Gen::FixupBranch m_aot_far_skip;
 
   void Trace();
 
