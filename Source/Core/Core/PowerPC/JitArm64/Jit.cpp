@@ -78,6 +78,7 @@ void JitArm64::AllocCodeRegions(bool executable)
 
 void JitArm64::Init()
 {
+  m_mmu.SetAotForm(JitArm64Aot::Active());
   if (JitArm64Aot::Active())
   {
     AotInit();

@@ -33,6 +33,9 @@
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 #include "Core/IOS/USB/Emulated/Microphone.h"
 #include "Core/PatchEngine.h"
+#ifdef _M_ARM_64
+#include "Core/PowerPC/JitArm64/JitArm64_Aot.h"
+#endif
 #include "Core/State.h"
 #include "Core/System.h"
 #include "DolphinLibretro/Audio.h"
@@ -79,6 +82,31 @@ double g_core_refresh_rate{0};
 // trigger a mode-family reinit, only a real in-game 50<->60 switch should.
 static bool s_refresh_rate_settled = false;
 extern void reload_cheats_from_ini();
+
+#ifdef _M_ARM_64
+// The frontend's private command for what the core did with the AOT image its rt_aot_image option
+// named, and its argument (retro-trainer's emulator.rs RT_ENVIRONMENT_AOT_OUTCOME, struct
+// RtAotOutcome), as the mupen64plus_next and flycast forks send it.
+#define RT_ENVIRONMENT_AOT_OUTCOME (RETRO_ENVIRONMENT_PRIVATE | 0x3601)
+struct rt_aot_outcome
+{
+  int admitted;
+  const char* detail;
+};
+
+// Once per decision, from retro_run: the decision is made on the CPU thread (JitArm64::AotInit).
+static void ReportAot()
+{
+  bool admitted;
+  std::string detail;
+  if (!JitArm64Aot::TakeReport(&admitted, &detail))
+    return;
+  rt_aot_outcome outcome{admitted ? 1 : 0, detail.c_str()};
+  const bool taken = environ_cb(RT_ENVIRONMENT_AOT_OUTCOME, &outcome);
+  fprintf(stderr, "JitArm64 AOT: reported \"%s\" to the frontend, which %s it\n", detail.c_str(),
+          taken ? "took" : "did not take");
+}
+#endif
 }  // namespace Libretro
 
 extern "C" {
@@ -323,6 +351,9 @@ void retro_run(void)
     DEBUG_LOG_FMT(BOOT, "retro_run() - waiting for g_emuthread_launched");
     return;
   }
+#ifdef _M_ARM_64
+  Libretro::ReportAot();
+#endif
 
   if (g_gfx && Config::Get(Config::MAIN_GFX_BACKEND) == "OGL")
   {

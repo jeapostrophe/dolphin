@@ -230,6 +230,11 @@ public:
   // JitArm64's AOT emit: instruction fetches answered from these words alone, as logged
   // (an address not among them is not readable).
   void SetAotFetchOverride(const std::unordered_map<u32, u32>* words) { m_aot_fetch = words; }
+  // JitArm64's AOT form (JitArm64_Aot.h): a block's code may not depend on what the BATs and the
+  // MMIO map say when it is compiled, so no address is optimizable (the IsOptimizable* below
+  // answer no), and JitBase::IsAotForm reads it.
+  void SetAotForm(bool aot_form) { m_aot_form = aot_form; }
+  bool IsAotForm() const { return m_aot_form; }
 
   template <std::unsigned_integral T>
   T Read(const u32 address);
@@ -374,6 +379,7 @@ private:
   std::map<u32, u32> m_added_readwrite_mappings;
 
   const std::unordered_map<u32, u32>* m_aot_fetch = nullptr;
+  bool m_aot_form = false;
   BatTable m_ibat_table;
   BatTable m_dbat_table;
 };

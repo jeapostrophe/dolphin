@@ -8,7 +8,7 @@
 // the meta in __TEXT,__const between rt_aot_meta and rt_aot_meta_end). The code is the shared
 // routines (GenerateAsm's, AOT-shaped), from offset 0, then the blocks. The meta, little-endian, is
 // ImageHeader, then u32 words: the routines' size, R_COUNT, the routine entry offsets
-// (JitArm64Aot::Routine order), then per block
+// (JitArm64::AotRoutines's order, then the quantized tables'), then per block
 //   ea, feature_flags, nops, nhooks, code_off, code_len, ops[2 * nops] (each op's address and
 //   word), hooks[2 * nhooks] (each op address HLE hooks, and its hook index),
 // the ops in the order the analyzer left them. A block's key is its address, feature flags, ops and
@@ -23,10 +23,15 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
+#include <fstream>
 #include <map>
+#include <mutex>
 #include <set>
+
+#ifndef _WIN32
+#include <dlfcn.h>
 #include <unistd.h>
+#endif
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -64,7 +69,10 @@ using namespace Arm64Gen;
 namespace JitArm64Aot
 {
 static Settings s_settings;
-static std::string s_outcome;
+static std::mutex s_report_mutex;
+static bool s_report_pending = false;
+static bool s_report_admitted = false;
+static std::string s_report_detail;
 
 bool ParseMode(const char* text, Mode* mode)
 {
@@ -91,9 +99,23 @@ const Settings& GetSettings()
   return s_settings;
 }
 
-const std::string& LastOutcome()
+void Report(bool admitted, std::string detail)
 {
-  return s_outcome;
+  std::lock_guard lock(s_report_mutex);
+  s_report_pending = true;
+  s_report_admitted = admitted;
+  s_report_detail = std::move(detail);
+}
+
+bool TakeReport(bool* admitted, std::string* detail)
+{
+  std::lock_guard lock(s_report_mutex);
+  if (!s_report_pending)
+    return false;
+  s_report_pending = false;
+  *admitted = s_report_admitted;
+  *detail = s_report_detail;
+  return true;
 }
 
 u64 Fnv64(const void* data, size_t size, u64 h)
@@ -121,11 +143,15 @@ void Imports::Unresolved(const void* target, const char* what)
   auto [it, fresh] = unresolved_seen.emplace(target, what);
   if (fresh)
   {
+#ifndef _WIN32
     Dl_info info{};
     const char* sym = dladdr(target, &info) && info.dli_sname ? info.dli_sname : "?";
     const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
     fprintf(stderr, "JitArm64 AOT: unresolved %s %p (%s, image offset %#" PRIxPTR ")\n", what,
             target, sym, base ? reinterpret_cast<uintptr_t>(target) - base : 0);
+#else
+    fprintf(stderr, "JitArm64 AOT: unresolved %s %p\n", what, target);
+#endif
   }
 }
 
@@ -196,7 +222,13 @@ static_assert(sizeof(ImageHeader) == 104, "the header's size is part of IMAGE_VE
 constexpr u32 IMAGE_MAGIC = 0x31415452;
 constexpr u32 IMAGE_VERSION = 3;
 
-// This core build's LC_UUID (from the Mach-O image holding this function); false off Apple.
+static bool IsZero16(const u8 b[16])
+{
+  return std::all_of(b, b + 16, [](u8 v) { return v == 0; });
+}
+
+// This core build's LC_UUID (from the Mach-O image holding this function); false off Apple, and
+// for an all-zero one, which names no build.
 static bool SelfUuid(u8 out[16])
 {
 #ifdef __APPLE__
@@ -211,7 +243,7 @@ static bool SelfUuid(u8 out[16])
     if (lc->cmd == LC_UUID)
     {
       memcpy(out, reinterpret_cast<const uuid_command*>(lc)->uuid, 16);
-      return true;
+      return !IsZero16(out);
     }
     p += lc->cmdsize;
   }
@@ -238,7 +270,7 @@ static bool ParseHex16(const std::string& s, u8 out[16])
       out[n / 2] = static_cast<u8>(v << 4);
     n++;
   }
-  return n == 32;
+  return n == 32 && !IsZero16(out);
 }
 
 static std::string Hex16(const u8 b[16])
@@ -260,7 +292,8 @@ static void GameIdentity(u8 out[16])
 {
   const std::string id =
       SConfig::GetInstance().GetGameID() + "/" + std::to_string(SConfig::GetInstance().GetRevision());
-  const u64 a = FnvString(id, 0xcbf29ce484222325ULL), b = FnvString(id, 0x84222325cbf29ce4ULL);
+  // the second hash from another basis, so the two halves differ
+  const u64 a = FnvString(id, FNV64_BASIS), b = FnvString(id, ~FNV64_BASIS);
   memcpy(out, &a, 8);
   memcpy(out + 8, &b, 8);
 }
@@ -273,7 +306,7 @@ static void GameIdentity(u8 out[16])
 // size, and the JitBlockData members the dispatcher reads.
 static u64 LayoutHash()
 {
-  u64 h = 0xcbf29ce484222325ULL;
+  u64 h = FNV64_BASIS;
   auto add = [&h](const char* name, size_t off, size_t size) {
     h = FnvString(name, h);
     const u64 v[2] = {off, size};
@@ -298,21 +331,37 @@ static u64 LayoutHash()
 
 using namespace JitArm64Aot;
 
-// The registers and options the code shape depends on, and the JIT settings (JitBase's
-// JIT_SETTINGS, the jo flags), as they stand in this JIT.
+// The registers and settings a block's code depends on, as they stand in this JIT: the jo flags,
+// JitBase's JIT_SETTINGS that change what a block compiles to (the per-category bJIT*Off among
+// them), and whether the MMU's address specializations are off (MMU::SetAotForm).
 u64 JitArm64::AotAbiHash() const
 {
   std::string text = fmt::format(
       "PPC_REG={} MEM_REG={} DISPATCHER_PC={} bAFP={} fastmem={} memcheck={} fp_exceptions={} "
       "div_by_zero={} accurate_single={} gather_pipe={} blocklink={} blr={} branch_follow={} "
       "debug={} profile={} fprf={} accurate_nans={} accurate_fmadds={} dcbz_hack={} "
-      "accurate_cache={} regcache_off={}",
+      "accurate_cache={} page_table_fastmem={} aot_form={}",
       static_cast<int>(PPC_REG), static_cast<int>(MEM_REG), static_cast<int>(DISPATCHER_PC),
       cpu_info.bAFP, jo.fastmem, jo.memcheck, jo.fp_exceptions, jo.div_by_zero_exceptions,
       jo.accurateSinglePrecision, jo.optimizeGatherPipe, jo.enableBlocklink,
       m_enable_blr_optimization, m_enable_branch_following, m_enable_debugging,
       m_enable_profiling, m_fprf, m_accurate_nans, m_accurate_fmadds, m_low_dcbz_hack,
-      m_accurate_cpu_cache_enabled, bJITRegisterCacheOff);
+      m_accurate_cpu_cache_enabled, m_page_table_fastmem_enabled, m_mmu.IsAotForm());
+  const bool off[] = {bJITOff,
+                      bJITLoadStoreOff,
+                      bJITLoadStorelXzOff,
+                      bJITLoadStorelwzOff,
+                      bJITLoadStorelbzxOff,
+                      bJITLoadStoreFloatingOff,
+                      bJITLoadStorePairedOff,
+                      bJITFloatingPointOff,
+                      bJITIntegerOff,
+                      bJITPairedOff,
+                      bJITSystemRegistersOff,
+                      bJITBranchOff,
+                      bJITRegisterCacheOff};
+  for (bool b : off)
+    text += b ? '1' : '0';
   return Fnv64(text.data(), text.size());
 }
 
@@ -355,17 +404,47 @@ bool JitArm64::AotTracingBlocks()
   return s_block_trace != nullptr;
 }
 
-void JitArm64::AotMissTrampoline(JitArm64& jit, u32 em_address)
+const u8** JitArm64::QuantizedTable(int which)
 {
-  if (jit.m_aot->mode == Mode::Load || jit.m_aot->mode == Mode::Interp)
-    jit.AotMiss(em_address);
-  else
-    jit.Jit(em_address);
+  if (m_aot)
+    return m_aot->quantized[which].data();
+  const u8** table = reinterpret_cast<const u8**>(AlignCode16() + GetWritableRegionDiff());
+  ReserveCodeSpace(8 * sizeof(u8*));
+  return table;
 }
 
-const u8** JitArm64::AotQuantizedTable(int which)
+// The routines an image carries, by name, in the order of its entry offsets and of their import
+// slots (so their order is in AotImportsHash): the one list of them.
+std::span<const JitArm64::AotRoutine> JitArm64::AotRoutines()
 {
-  return m_aot->quantized[which].data();
+  static constexpr AotRoutine routines[] = {
+      {"enter_code", &JitArm64::enter_code},
+      {"dispatcher", &JitArm64::dispatcher},
+      {"dispatcher_no_timing_check", &JitArm64::dispatcher_no_timing_check},
+      {"dispatcher_no_check", &JitArm64::dispatcher_no_check},
+      {"do_timing", &JitArm64::do_timing},
+      {"dispatcher_exit", &JitArm64::dispatcher_exit},
+      {"fres", &JitArm64::fres},
+      {"frsqrte", &JitArm64::frsqrte},
+      {"cdts", &JitArm64::cdts},
+      {"cstd", &JitArm64::cstd},
+      {"fprf_single", &JitArm64::fprf_single},
+      {"fprf_double", &JitArm64::fprf_double},
+      {"fmadds_eft", &JitArm64::fmadds_eft},
+      {"ps_madd_eft", &JitArm64::ps_madd_eft},
+  };
+  static_assert(std::size(routines) == R_QUANTIZED);
+  return routines;
+}
+
+// The quantized-routine tables, in the order of their routines' entry offsets (R_QUANTIZED + 8 * t).
+std::span<const JitArm64::AotQuantizedTable> JitArm64::AotQuantizedTables()
+{
+  static constexpr AotQuantizedTable tables[] = {
+      &JitArm64::paired_load_quantized, &JitArm64::single_load_quantized,
+      &JitArm64::paired_store_quantized, &JitArm64::single_store_quantized};
+  static_assert(R_QUANTIZED + 8 * std::size(tables) == R_COUNT);
+  return tables;
 }
 
 // The import table, in an order every build of this source fixes: the routines (their values set
@@ -374,20 +453,16 @@ const u8** JitArm64::AotQuantizedTable(int which)
 void JitArm64::AotRegisterImports()
 {
   Imports& im = m_aot->imports;
-  static const char* routine_names[] = {
-      "enter_code", "dispatcher", "dispatcher_no_timing_check", "dispatcher_no_check",
-      "do_timing",  "dispatcher_exit", "fres", "frsqrte", "cdts", "cstd", "fprf_single",
-      "fprf_double", "fmadds_eft", "ps_madd_eft"};
-  static_assert(std::size(routine_names) == R_QUANTIZED);
-  for (const char* name : routine_names)
-    im.Add(fmt::format("routine:{}", name), nullptr);
-  for (int t = 0; t < 4; t++)
+  for (const AotRoutine& r : AotRoutines())
+    im.Add(fmt::format("routine:{}", r.name), nullptr);
+  for (size_t t = 0; t < AotQuantizedTables().size(); t++)
     im.Add(fmt::format("quantized_table:{}", t), m_aot->quantized[t].data());
 
   auto& memory = m_system.GetMemory();
   auto obj = [&im](const char* name, const void* p) { im.Add(name, p); };
   auto fn = [&im](const char* name, auto f) { im.Add(name, reinterpret_cast<const void*>(f)); };
   obj("jit", this);
+  obj("ppc_state", &m_ppc_state);
   obj("system", &m_system);
   obj("mmu", &m_mmu);
   obj("interpreter", &m_system.GetInterpreter());
@@ -408,7 +483,7 @@ void JitArm64::AotRegisterImports()
   obj("frsqrte_expected", &Common::frsqrte_expected);
   obj("quantize_table", &m_quantizeTableS);
   obj("dequantize_table", &m_dequantizeTableS);
-  fn("aot_miss", &JitArm64::AotMissTrampoline);
+  fn("JitTrampoline", &JitTrampoline);
   fn("JitBase::Dispatch", &JitBase::Dispatch);
   fn("CoreTiming::GlobalAdvance", &CoreTiming::GlobalAdvance);
   fn("CoreTiming::GlobalIdle", &CoreTiming::GlobalIdle);
@@ -467,24 +542,13 @@ void JitArm64::AotFillImportTable()
 void JitArm64::AotRegisterRoutines()
 {
   auto& r = m_aot->routines;
-  r[R_ENTER_CODE] = enter_code;
-  r[R_DISPATCHER] = dispatcher;
-  r[R_DISPATCHER_NO_TIMING_CHECK] = dispatcher_no_timing_check;
-  r[R_DISPATCHER_NO_CHECK] = dispatcher_no_check;
-  r[R_DO_TIMING] = do_timing;
-  r[R_DISPATCHER_EXIT] = dispatcher_exit;
-  r[R_FRES] = fres;
-  r[R_FRSQRTE] = frsqrte;
-  r[R_CDTS] = cdts;
-  r[R_CSTD] = cstd;
-  r[R_FPRF_SINGLE] = fprf_single;
-  r[R_FPRF_DOUBLE] = fprf_double;
-  r[R_FMADDS_EFT] = fmadds_eft;
-  r[R_PS_MADD_EFT] = ps_madd_eft;
-  for (int t = 0; t < 4; t++)
+  const auto routines = AotRoutines();
+  for (size_t i = 0; i < routines.size(); i++)
+    r[i] = this->*routines[i].member;
+  for (size_t t = 0; t < AotQuantizedTables().size(); t++)
     for (int i = 0; i < 8; i++)
       r[R_QUANTIZED + 8 * t + i] = m_aot->quantized[t][i];
-  for (int i = 0; i < R_QUANTIZED; i++)
+  for (u32 i = 0; i < R_QUANTIZED; i++)
     m_aot->imports.Set(i, r[i]);
   AotFillImportTable();
 }
@@ -493,30 +557,19 @@ void JitArm64::AotRegisterRoutines()
 void JitArm64::AotBindRoutines(const u8* code, const u32* entries)
 {
   auto& r = m_aot->routines;
-  for (int i = 0; i < R_COUNT; i++)
+  for (u32 i = 0; i < R_COUNT; i++)
     r[i] = code + entries[i];
-  enter_code = r[R_ENTER_CODE];
-  dispatcher = r[R_DISPATCHER];
-  dispatcher_no_timing_check = r[R_DISPATCHER_NO_TIMING_CHECK];
-  dispatcher_no_check = r[R_DISPATCHER_NO_CHECK];
-  do_timing = r[R_DO_TIMING];
-  dispatcher_exit = r[R_DISPATCHER_EXIT];
-  fres = r[R_FRES];
-  frsqrte = r[R_FRSQRTE];
-  cdts = r[R_CDTS];
-  cstd = r[R_CSTD];
-  fprf_single = r[R_FPRF_SINGLE];
-  fprf_double = r[R_FPRF_DOUBLE];
-  fmadds_eft = r[R_FMADDS_EFT];
-  ps_madd_eft = r[R_PS_MADD_EFT];
-  for (int t = 0; t < 4; t++)
+  const auto routines = AotRoutines();
+  for (size_t i = 0; i < routines.size(); i++)
+    this->*routines[i].member = r[i];
+  const auto tables = AotQuantizedTables();
+  for (size_t t = 0; t < tables.size(); t++)
+  {
     for (int i = 0; i < 8; i++)
       m_aot->quantized[t][i] = r[R_QUANTIZED + 8 * t + i];
-  paired_load_quantized = m_aot->quantized[0].data();
-  single_load_quantized = m_aot->quantized[1].data();
-  paired_store_quantized = m_aot->quantized[2].data();
-  single_store_quantized = m_aot->quantized[3].data();
-  for (int i = 0; i < R_QUANTIZED; i++)
+    this->*tables[t] = m_aot->quantized[t].data();
+  }
+  for (u32 i = 0; i < R_QUANTIZED; i++)
     m_aot->imports.Set(i, r[i]);
   AotFillImportTable();
 }
@@ -526,8 +579,8 @@ void JitArm64::AotInit()
   const Settings& cfg = GetSettings();
   m_aot = std::make_unique<State>();
   m_aot->mode = cfg.mode;
-  m_aot_form = true;
 
+  // No fastmem arena (InitFastmemArena is not called), so no fastmem (JitBase::RefreshConfig)
   jo.fastmem_arena = false;
   RefreshConfig();
 
@@ -573,8 +626,9 @@ void JitArm64::AotInit()
   std::string why;
   if (!AotOpenImage(cfg.image, &why))
   {
-    s_outcome = "refused " + cfg.image + ": " + why;
-    fprintf(stderr, "JitArm64 AOT: %s\n", s_outcome.c_str());
+    const std::string refused = "refused " + cfg.image + ": " + why;
+    fprintf(stderr, "JitArm64 AOT: %s\n", refused.c_str());
+    Report(false, refused);
     if (cfg.mode == Mode::Load)
     {
       fflush(stderr);
@@ -584,9 +638,10 @@ void JitArm64::AotInit()
     m_aot_refused = true;
     return;
   }
-  s_outcome = "admitted " + cfg.image;
-  fprintf(stderr, "JitArm64 AOT: %s, %zu blocks\n", s_outcome.c_str(),
-          m_aot->image_blocks.size());
+  const std::string admitted =
+      fmt::format("admitted {}, {} blocks", cfg.image, m_aot->image_blocks.size());
+  fprintf(stderr, "JitArm64 AOT: %s\n", admitted.c_str());
+  Report(true, admitted);
   if (cfg.mode == Mode::Interp)
     AotStartInterpreter();
   VMReport("at image load");
@@ -594,7 +649,7 @@ void JitArm64::AotInit()
 
 u64 JitArm64::AotImportsHash() const
 {
-  u64 h = 0xcbf29ce484222325ULL;
+  u64 h = FNV64_BASIS;
   for (const std::string& name : m_aot->imports.names)
     h = FnvString(name, h);
   return h;
@@ -603,7 +658,7 @@ u64 JitArm64::AotImportsHash() const
 void JitArm64::AotStartInterpreter()
 {
   m_aot_ci = std::make_unique<CachedInterpreter>(m_system);
-  m_aot_ci->SetJitTimed(true, &JitArm64::AotExitKind);
+  m_aot_ci->SetJitTiming(this);
   m_aot_ci->Init();
   blocks.SetShadowCache(m_aot_ci->GetBlockCache());
 }
@@ -616,18 +671,17 @@ void JitArm64::AotRoutinesGenerated(const u8* begin, const u8* end)
   AotRegisterRoutines();
 }
 
-bool JitArm64::AotHeader(u8* out, u32 nblocks, u32 code_size, const std::string& core_uuid) const
+// `core_uuid`: the loading build's LC_UUID, or null for this build's own. False when this build
+// has no LC_UUID (off Apple): no image may name it.
+bool JitArm64::AotHeader(u8* out, u32 nblocks, u32 code_size, const u8* core_uuid) const
 {
   ImageHeader h{};
   h.magic = IMAGE_MAGIC;
   h.version = IMAGE_VERSION;
   h.import_count = static_cast<u32>(m_aot->imports.names.size());
   h.nblocks = nblocks;
-  bool ok = SelfUuid(h.emit_uuid);
-  if (core_uuid.empty())
-    memcpy(h.core_uuid, h.emit_uuid, 16);
-  else
-    ok = ParseHex16(core_uuid, h.core_uuid) && ok;
+  const bool ok = SelfUuid(h.emit_uuid);
+  memcpy(h.core_uuid, core_uuid ? core_uuid : h.emit_uuid, 16);
   GameIdentity(h.rom_md5);
   h.imports_hash = AotImportsHash();
   h.layout_hash = LayoutHash();
@@ -639,6 +693,10 @@ bool JitArm64::AotHeader(u8* out, u32 nblocks, u32 code_size, const std::string&
 
 bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
 {
+#ifdef _WIN32
+  *why = "images are dylibs, which this platform does not open";
+  return false;
+#else
   void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!handle)
   {
@@ -654,15 +712,17 @@ bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
     dlclose(handle);
     return false;
   };
-  if (!code || !code_end || !meta || !meta_end || meta_end - meta < 104)
+  if (!code || !code_end || !meta || !meta_end ||
+      meta_end - meta < static_cast<ptrdiff_t>(sizeof(ImageHeader)))
+  {
     return refuse("symbols: no rt_aot_code..rt_aot_code_end and rt_aot_meta..rt_aot_meta_end");
+  }
 
   ImageHeader got, want;
   memcpy(&got, meta, sizeof(got));
   u8 want_bytes[sizeof(ImageHeader)];
-  u8 self[16];
-  AotHeader(want_bytes, got.nblocks, static_cast<u32>(code_end - code),
-            SelfUuid(self) ? Hex16(self) : std::string());
+  if (!AotHeader(want_bytes, got.nblocks, static_cast<u32>(code_end - code), nullptr))
+    return refuse("core_uuid: this core build has no LC_UUID to check the image's against");
   memcpy(&want, want_bytes, sizeof(want));
 #define AOT_FIELD(f)                                                                               \
   if (got.f != want.f)                                                                             \
@@ -687,11 +747,11 @@ bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
 
   const u32* w = reinterpret_cast<const u32*>(meta + sizeof(ImageHeader));
   const u32* end = reinterpret_cast<const u32*>(meta_end);
-  if (end - w < 2 + R_COUNT || w[1] != R_COUNT || w[0] > got.code_size)
+  if (end - w < 2 + static_cast<ptrdiff_t>(R_COUNT) || w[1] != R_COUNT || w[0] > got.code_size)
     return refuse("routines: not this core's routine table");
   const u32 routines_size = w[0];
   const u32* entries = w + 2;
-  for (int i = 0; i < R_COUNT; i++)
+  for (u32 i = 0; i < R_COUNT; i++)
     if (entries[i] >= routines_size)
       return refuse(fmt::format("routines: entry {} at {:#x} is past their end", i, entries[i]));
   w = entries + R_COUNT;
@@ -713,6 +773,7 @@ bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
   blocks.SetImageCode(code, code_end);
   AotBindRoutines(code, entries);
   return true;
+#endif
 }
 
 // A block the dispatcher did not find: install the image's block for it when its ops are the
@@ -830,6 +891,7 @@ void JitArm64::AotReport()
 
 void JitArm64::AotShutdown()
 {
+  m_mmu.SetAotForm(false);
   AotReport();
   VMReport("at end of run");
   if (m_aot->log)
@@ -847,8 +909,8 @@ void JitArm64::AotShutdown()
 void JitArm64::AotEmit()
 {
   const Settings& cfg = GetSettings();
-  FILE* f = fopen(cfg.log.c_str(), "r");
-  if (!f)
+  std::ifstream in(cfg.log);
+  if (!in)
   {
     fprintf(stderr, "JitArm64 AOT emit: cannot read %s\n", cfg.log.c_str());
     std::exit(2);
@@ -863,20 +925,50 @@ void JitArm64::AotEmit()
   };
   std::vector<Rec> recs;
   std::map<std::tuple<u32, u32, std::vector<u32>, std::vector<u32>>, size_t> seen;
-  u32 dup_differs = 0, routines_differ = 0;
-  char tag[4];
-  while (fscanf(f, "%3s", tag) == 1)
+  u32 dup_differs = 0, routines_differ = 0, malformed = 0, r_lines = 0, line_no = 0;
+  std::string line;
+  // Each line whole: a record cut short (a shape run that did not end) or with anything after its
+  // fields is malformed, never read as far as it goes.
+  auto parse_record = [](const char* p, Rec* r) {
+    int n = 0;
+    if (sscanf(p, "B %x %x %u %zu %" SCNx64 " %u %u%n", &r->ea, &r->ff, &r->nops, &r->len,
+               &r->hash, &r->unresolved, &r->nhooks, &n) != 7)
+      return false;
+    p += n;
+    auto pairs = [&p](std::vector<u32>* out, u32 count) {
+      out->resize(2 * static_cast<size_t>(count));
+      for (u32 i = 0; i < count; i++)
+      {
+        int m = 0;
+        if (sscanf(p, " %x:%x%n", &(*out)[2 * i], &(*out)[2 * i + 1], &m) != 2)
+          return false;
+        p += m;
+      }
+      return true;
+    };
+    if (!pairs(&r->ops, r->nops) || !pairs(&r->hooks, r->nhooks))
+      return false;
+    return strspn(p, " \r") == strlen(p);
+  };
+  while (std::getline(in, line))
   {
-    if (tag[0] == 'R')
+    line_no++;
+    if (line.starts_with("R "))
     {
       size_t size, nimports;
       u64 hash, ihash, ahash;
-      if (fscanf(f, "%zu %" SCNx64 " %zu %" SCNx64 " %" SCNx64, &size, &hash, &nimports, &ihash,
-                 &ahash) != 5)
-        break;
-      if (size != m_aot->routines_size || hash != Fnv64(m_aot->routines_begin, size) ||
-          nimports != m_aot->imports.names.size() || ihash != AotImportsHash() ||
-          ahash != AotAbiHash())
+      int n = 0;
+      r_lines++;
+      if (sscanf(line.c_str(), "R %zu %" SCNx64 " %zu %" SCNx64 " %" SCNx64 "%n", &size, &hash,
+                 &nimports, &ihash, &ahash, &n) != 5 ||
+          strspn(line.c_str() + n, " \r") != line.size() - n)
+      {
+        fprintf(stderr, "JitArm64 AOT emit: line %u: a malformed R line\n", line_no);
+        malformed++;
+      }
+      else if (size != m_aot->routines_size || hash != Fnv64(m_aot->routines_begin, size) ||
+               nimports != m_aot->imports.names.size() || ihash != AotImportsHash() ||
+               ahash != AotAbiHash())
       {
         fprintf(stderr, "JitArm64 AOT emit: the routines or imports differ from the shape run's\n");
         routines_differ++;
@@ -884,17 +976,12 @@ void JitArm64::AotEmit()
       continue;
     }
     Rec r;
-    if (fscanf(f, "%x %x %u %zu %" SCNx64 " %u %u", &r.ea, &r.ff, &r.nops, &r.len, &r.hash,
-               &r.unresolved, &r.nhooks) != 7)
-      break;
-    r.ops.resize(2 * r.nops);
-    for (u32 i = 0; i < r.nops; i++)
-      if (fscanf(f, " %x:%x", &r.ops[2 * i], &r.ops[2 * i + 1]) != 2)
-        break;
-    r.hooks.resize(2 * r.nhooks);
-    for (u32 i = 0; i < r.nhooks; i++)
-      if (fscanf(f, " %x:%x", &r.hooks[2 * i], &r.hooks[2 * i + 1]) != 2)
-        break;
+    if (!parse_record(line.c_str(), &r))
+    {
+      fprintf(stderr, "JitArm64 AOT emit: line %u: not a whole R or B record\n", line_no);
+      malformed++;
+      continue;
+    }
     auto [it, fresh] = seen.emplace(std::make_tuple(r.ea, r.ff, r.ops, r.hooks), recs.size());
     if (!fresh)
     {
@@ -904,12 +991,17 @@ void JitArm64::AotEmit()
     }
     recs.push_back(std::move(r));
   }
-  fclose(f);
+  // The R line is what ties the log to this build's routines and imports: a log without one is
+  // checked against nothing
+  if (r_lines != 1)
+  {
+    fprintf(stderr, "JitArm64 AOT emit: the log has %u R lines, not 1\n", r_lines);
+    malformed++;
+  }
 
   std::vector<u8> code(m_aot->routines_begin, m_aot->routines_begin + m_aot->routines_size);
   std::vector<u32> meta_blocks;
   u32 differs = 0, unresolved = 0, failed = 0;
-  m_aot_emitting = true;
   const u32 saved_ff = m_ppc_state.feature_flags;
   for (const Rec& r : recs)
   {
@@ -971,14 +1063,16 @@ void JitArm64::AotEmit()
   m_ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(saved_ff);
 
   std::vector<u8> meta(sizeof(ImageHeader));
-  if (!AotHeader(meta.data(), static_cast<u32>(recs.size()), static_cast<u32>(code.size()),
-                 cfg.core_uuid))
+  u8 core_uuid[16];
+  if ((!cfg.core_uuid.empty() && !ParseHex16(cfg.core_uuid, core_uuid)) ||
+      !AotHeader(meta.data(), static_cast<u32>(recs.size()), static_cast<u32>(code.size()),
+                 cfg.core_uuid.empty() ? nullptr : core_uuid))
   {
     fprintf(stderr, "JitArm64 AOT emit: no LC_UUID, or DOLPHIN_AOT_CORE_UUID is not one\n");
     std::exit(2);
   }
   std::vector<u32> body = {static_cast<u32>(m_aot->routines_size), R_COUNT};
-  for (int i = 0; i < R_COUNT; i++)
+  for (u32 i = 0; i < R_COUNT; i++)
     body.push_back(static_cast<u32>(m_aot->routines[i] - m_aot->routines_begin));
   body.insert(body.end(), meta_blocks.begin(), meta_blocks.end());
   const u8* bb = reinterpret_cast<const u8*>(body.data());
@@ -987,12 +1081,13 @@ void JitArm64::AotEmit()
   const std::string code_path = cfg.image + ".code", meta_path = cfg.image + ".meta";
   remove(code_path.c_str());
   remove(meta_path.c_str());
-  const bool bad = differs || unresolved || failed || dup_differs || routines_differ;
+  const bool bad = differs || unresolved || failed || dup_differs || routines_differ || malformed;
   fprintf(stderr,
-          "JitArm64 AOT emit: %zu blocks (%u duplicate records compiled differently), %zu bytes "
-          "of code (routines %zu); %u differ from the shape run's, %u hold a host address, %u "
-          "failed\n",
-          recs.size(), dup_differs, code.size(), m_aot->routines_size, differs, unresolved, failed);
+          "JitArm64 AOT emit: %zu blocks (%u duplicate records compiled differently, %u malformed "
+          "lines), %zu bytes of code (routines %zu); %u differ from the shape run's, %u hold a "
+          "host address, %u failed\n",
+          recs.size(), dup_differs, malformed, code.size(), m_aot->routines_size, differs,
+          unresolved, failed);
   if (!bad || cfg.corrupt)
   {
     FILE* c = fopen(code_path.c_str(), "wb");

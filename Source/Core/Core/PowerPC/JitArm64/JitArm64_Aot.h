@@ -4,23 +4,31 @@
 // JitArm64's AOT form (retro-trainer PLAN-handheld HH-34): a game's blocks compiled on the Mac into
 // code that holds no host address, so a dylib of them runs where nothing may be written and then
 // executed. retro-trainer's cores/README.md, "AOT images", says how an image is made and shipped;
-// JitArm64_Aot.cpp's header comment is the format's home.
+// JitArm64_Aot.cpp's header comment is the format's home. This comment is the modes' home.
 //
-// The modes (JitArm64Aot::Configure; DolphinLibretro/Boot.cpp reads them from the environment, or
-// the core option rt_aot_image):
+// The modes (JitArm64Aot::Configure; DolphinLibretro/Boot.cpp's ConfigureAot sets them). The Mac's
+// tooling names one in DOLPHIN_AOT, with DOLPHIN_AOT_IMAGE, DOLPHIN_AOT_LOG, DOLPHIN_AOT_CORE_UUID
+// and DOLPHIN_AOT_CORRUPT (Settings, below); without DOLPHIN_AOT, the frontend's private core
+// option rt_aot_image names an image, run in interp, and what the core did with it goes back to
+// the frontend (TakeReport). Any mode runs JitArm64 on the software vertex loader (the vertex
+// loader JIT is the other writer of code), with FPRF on, and maps no fastmem arena.
 // - shape: the JIT, emitting AOT-shaped code (below) from its usual MAP_JIT cache, logging each
 //   block it compiles: its key, the guest words its compile read, its code's length and hash;
 // - emit: re-compiles each logged block from its logged words into plain memory, checks each is
 //   byte for byte the code the shape run compiled, writes <image>.code and <image>.meta, and exits;
 // - load: maps no code cache; the shared routines and the blocks come from the image's dylib, a
 //   block installed where the JIT would have compiled it once its words are checked; a miss stops;
-// - interp: load, with a miss run by the Cached Interpreter, charged as the JIT charges.
+// - interp: load, with a miss run by the Cached Interpreter, charged as the JIT charges
+//   (CachedInterpreter::JitTiming). It does not leave the guest state the image's code would:
+//   the interpreter sets FPSCR's XX, FI and FX where JitArm64 does not, and JitArm64's compares
+//   leave junk in CR's SO bits where the interpreter copies XER.SO, so a run's results depend on
+//   which blocks its image holds.
 //
 // AOT-shaped code: every host address through PowerPCState::aot_imports (Arm64Gen's
 // AotImportResolver: pointers, calls, branches to the routines); no far code (it is emitted inline
 // and branched over); no block linking, BLR optimization, fastmem, speculative constants, paired
-// quantize assumption, gather pipe or constant-address specializations, so a block's code is a
-// function of its words and its feature flags alone.
+// quantize assumption, gather pipe or constant-address specializations (MMU::SetAotForm), so a
+// block's code is a function of its words, its feature flags and the HLE hooks at its ops alone.
 
 #pragma once
 
@@ -47,10 +55,12 @@ enum class Mode
 struct Settings
 {
   Mode mode = Mode::Off;
-  std::string image;      // emit: the prefix it writes; load, interp: the dylib
-  std::string log;        // shape: the block log it writes; emit: the one it reads
-  std::string core_uuid;  // emit: the LC_UUID of the core build that will load the image
-  u32 corrupt = 0;        // emit: this block's code gets one instruction changed (a red receipt)
+  std::string image;      // DOLPHIN_AOT_IMAGE; emit: the prefix it writes; load, interp: the dylib
+  std::string log;        // DOLPHIN_AOT_LOG; shape: the block log it writes; emit: the one it reads
+  std::string core_uuid;  // DOLPHIN_AOT_CORE_UUID; emit: the LC_UUID of the build that will load
+                          // the image (the emitting build's own when empty)
+  u32 corrupt = 0;  // DOLPHIN_AOT_CORRUPT (hex); emit: this block's code gets one instruction
+                    // changed (a red receipt)
 };
 
 // "shape", "emit", "load", "interp"; false for anything else.
@@ -61,29 +71,17 @@ inline bool Active()
 {
   return GetSettings().mode != Mode::Off;
 }
-// What the last load or interp init did with its image, for the frontend: admitted, or why not.
-const std::string& LastOutcome();
+// A load or interp init's decision about its image: admitted, and its line saying so (the image
+// and its blocks, or why it was refused). Report is called on the CPU thread; TakeReport gives a
+// decision once, to the frontend's thread (DolphinLibretro's retro_run).
+void Report(bool admitted, std::string detail);
+bool TakeReport(bool* admitted, std::string* detail);
 
-// The routine entry points an image carries, in order (offsets from the image's code start).
-enum Routine : u32
-{
-  R_ENTER_CODE,
-  R_DISPATCHER,
-  R_DISPATCHER_NO_TIMING_CHECK,
-  R_DISPATCHER_NO_CHECK,
-  R_DO_TIMING,
-  R_DISPATCHER_EXIT,
-  R_FRES,
-  R_FRSQRTE,
-  R_CDTS,
-  R_CSTD,
-  R_FPRF_SINGLE,
-  R_FPRF_DOUBLE,
-  R_FMADDS_EFT,
-  R_PS_MADD_EFT,
-  R_QUANTIZED,  // 4 tables of 8: paired load, single load, paired store, single store
-  R_COUNT = R_QUANTIZED + 32,
-};
+// The routine entry points an image carries, in order (offsets from the image's code start): the
+// named routines (JitArm64::AotRoutines), then the quantized loads and stores, 4 tables of 8
+// (paired load, single load, paired store, single store).
+constexpr u32 R_QUANTIZED = 14;
+constexpr u32 R_COUNT = R_QUANTIZED + 32;
 
 class Imports final : public Arm64Gen::AotImportResolver
 {
@@ -128,7 +126,8 @@ struct State
   } stats;
 };
 
-u64 Fnv64(const void* data, size_t size, u64 h = 0xcbf29ce484222325ULL);
+constexpr u64 FNV64_BASIS = 0xcbf29ce484222325ULL;
+u64 Fnv64(const void* data, size_t size, u64 h = FNV64_BASIS);
 // Writable and executable regions, executable ones, and executable ones no file backs, of this
 // process, printed with `label` (macOS; elsewhere a line saying it cannot count).
 void VMReport(const char* label);
