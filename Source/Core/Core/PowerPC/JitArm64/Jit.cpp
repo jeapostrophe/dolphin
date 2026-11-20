@@ -553,9 +553,23 @@ void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return
 
   if (m_aot)
   {
-    // No link: the exit goes to the dispatcher, which reads the flags DoDownCount set.
+    // Linked through the link table (JitArm64_Aot.cpp, "Links"): out of time, do_timing; else the
+    // entry of `destination`'s slot, its block's code or the dispatcher's lookup.
+    const u32 k = AotLinkSlot(destination);
     MOVI2R(DISPATCHER_PC, destination);
-    B(dispatcher);
+    if (k == UINT32_MAX)  // the table is full: the dispatcher's lookup
+    {
+      B(dispatcher);
+      return;
+    }
+    FixupBranch out_of_time = B(CC_LE);
+    AotLoadImport(ARM64Reg::X30,
+                  m_aot->link_table.get() + k / JitArm64Aot::LINKS_GROUP * JitArm64Aot::LINKS_GROUP,
+                  "link_table");
+    LDR(IndexType::Unsigned, ARM64Reg::X30, ARM64Reg::X30, k % JitArm64Aot::LINKS_GROUP * 8);
+    BR(ARM64Reg::X30);
+    SetJumpTarget(out_of_time);
+    B(do_timing);
     return;
   }
 
@@ -1147,6 +1161,8 @@ void JitArm64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
         m_aot_last_block = b;
         if (m_aot->log)
           AotLogBlock(*b);
+        if (m_aot->mode == JitArm64Aot::Mode::Shape)
+          AotLink(*b);
       }
 
 #ifdef JIT_LOG_GENERATED_CODE

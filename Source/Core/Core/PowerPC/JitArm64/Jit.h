@@ -51,6 +51,9 @@ public:
   bool HandleFastmemFault(SContext* ctx);
 
   void ClearCache() override;
+  // The AOT form's link table (JitArm64_Aot.cpp, "Links"): a block about to be destroyed is no
+  // longer the target of the exits that name it.
+  void AotUnlink(const JitBlock& block);
 
   CommonAsmRoutinesBase* GetAsmRoutines() override { return this; }
   void Run() override;
@@ -348,6 +351,11 @@ protected:
   void AotStartInterpreter();
   void AotMiss(u32 em_address);
   void AotLogBlock(const JitBlock& b);
+  // Links: the slot of the exits to `destination` under the current feature flags (shape assigns
+  // one and logs it; emit has them from the log), and a block's slot pointed at it once installed.
+  u32 AotLinkSlot(u32 destination);
+  void AotLink(const JitBlock& block);
+  void AotAllocLinks();
   std::vector<u32> AotBlockHooks() const;
   void AotDumpCode(const char* what, const u8* code, size_t len);
   void AotReport();

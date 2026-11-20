@@ -34,6 +34,7 @@
 
 #include <array>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -83,6 +84,12 @@ bool TakeReport(bool* admitted, std::string* detail);
 constexpr u32 R_QUANTIZED = 14;
 constexpr u32 R_COUNT = R_QUANTIZED + 32;
 
+// The link table (JitArm64_Aot.cpp, "Links"): LINKS_GROUPS import slots, each the base of
+// LINKS_GROUP entries, so an exit reaches its entry with two loads off PPC_REG.
+constexpr u32 LINKS_GROUP = 4096;
+constexpr u32 LINKS_GROUPS = 64;
+constexpr u32 LINKS_MAX = LINKS_GROUP * LINKS_GROUPS;
+
 class Imports final : public Arm64Gen::AotImportResolver
 {
 public:
@@ -120,9 +127,16 @@ struct State
   const u8* image_code = nullptr;
   size_t image_code_size = 0;
   std::unordered_multimap<u64, ImageBlock> image_blocks;  // (feature_flags << 32 | ea)
+  // Links: entry k holds the code an exit to link_keys[k] (feature_flags << 32 | ea) branches to,
+  // that block's entry or the dispatcher's (link_fallback)
+  std::unique_ptr<const u8*[]> link_table;
+  std::vector<u64> link_keys;
+  std::unordered_map<u64, u32> link_slot_of;
+  const u8* link_fallback = nullptr;
   struct
   {
-    u64 compiled = 0, unresolved_blocks = 0, installs = 0, misses = 0, interp_blocks = 0;
+    u64 compiled = 0, unresolved_blocks = 0, installs = 0, misses = 0, interp_blocks = 0,
+        link_misses = 0;
   } stats;
 };
 

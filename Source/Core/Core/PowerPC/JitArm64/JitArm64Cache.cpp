@@ -113,6 +113,7 @@ void JitArm64BlockCache::WriteDestroyBlock(const JitBlock& block)
 
 void JitArm64BlockCache::DestroyBlock(JitBlock& block)
 {
+  static_cast<JitArm64&>(m_jit).AotUnlink(block);
   JitBaseBlockCache::DestroyBlock(block);
 
   if (block.near_begin != block.near_end)
