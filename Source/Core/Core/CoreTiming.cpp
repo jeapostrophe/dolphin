@@ -354,6 +354,18 @@ void CoreTimingManager::Advance()
   auto& ppc_state = power_pc.GetPPCState();
 
   int cyclesExecuted = m_globals.slice_length - DowncountToCycles(ppc_state.downcount);
+  // Lane-only (retro-trainer HH-34, never for a pinned core): each timing slice's end, to
+  // DOLPHIN_TRACE, for comparing two CPU cores' timing.
+  static FILE* trace = [] {
+    const char* path = getenv("DOLPHIN_TRACE");
+    return path && *path ? fopen(path, "w") : nullptr;
+  }();
+  if (trace)
+  {
+    fprintf(trace, "%08x %d %lld %x %08x\n", ppc_state.pc, ppc_state.downcount,
+            static_cast<long long>(m_globals.global_timer), ppc_state.Exceptions,
+            ppc_state.msr.Hex);
+  }
   m_globals.global_timer += cyclesExecuted;
   m_last_oc_factor = m_config_oc_factor;
   m_globals.last_OC_factor_inverted = m_config_oc_inv_factor;

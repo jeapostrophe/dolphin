@@ -383,6 +383,17 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
         m_free_ranges.erase(b->near_begin, b->near_end);
 
       m_block_cache.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
+      // Lane-only (retro-trainer HH-34): DOLPHIN_DUMP_CI names a block to print as compiled.
+      static const u32 dump = [] {
+        const char* v = getenv("DOLPHIN_DUMP_CI");
+        return v ? static_cast<u32>(strtoul(v, nullptr, 16)) : 0u;
+      }();
+      if (dump == em_address)
+      {
+        std::ostringstream stream;
+        Disassemble(*b, stream);
+        fprintf(stderr, "CI block %08x:\n%s", em_address, stream.str().c_str());
+      }
 
 #ifdef JIT_LOG_GENERATED_CODE
       LogGeneratedCode();
