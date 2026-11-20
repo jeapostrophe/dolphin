@@ -99,6 +99,15 @@ void JitArm64::GenerateAsm()
 
   dispatcher_no_check = GetCodePtr();
 
+  if (m_aot && m_aot->mode == JitArm64Aot::Mode::Shape && AotTracingBlocks())
+  {
+    MOV(ARM64Reg::W0, DISPATCHER_PC);
+    LDR(IndexType::Unsigned, ARM64Reg::W1, PPC_REG, PPCSTATE_OFF(downcount));
+    MOV(ARM64Reg::X2, PPC_REG);
+    MOVI2R(ARM64Reg::X8, reinterpret_cast<uintptr_t>(&JitArm64::AotTraceBlock));
+    BLR(ARM64Reg::X8);
+  }
+
   bool assembly_dispatcher = true;
 
   if (assembly_dispatcher)

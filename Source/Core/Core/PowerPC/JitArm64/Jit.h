@@ -313,6 +313,8 @@ protected:
 
   // The AOT form (JitArm64_Aot.h, JitArm64_Aot.cpp; retro-trainer HH-34)
   static void AotMissTrampoline(JitArm64& jit, u32 em_address);
+  static void AotTraceBlock(u32 pc, s32 downcount, const PowerPC::PowerPCState* ppc);
+  static bool AotTracingBlocks();
   // How this JIT leaves a block after `op` (CachedInterpreter::JitExit), for its interp misses.
   static u32 AotExitKind(const PPCAnalyst::CodeOp& op);
   void AllocCodeRegions(bool executable);

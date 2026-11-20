@@ -201,6 +201,22 @@ void retro_reset(void)
 
 void retro_run(void)
 {
+  {
+    // Lane-only (retro-trainer HH-34, never for a pinned core): MEM1 as it stood after run N, to
+    // DOLPHIN_DUMP_RAM=N:<path>, read at the start of run N + 1.
+    static int runs = 0;
+    static const char* dump = getenv("DOLPHIN_DUMP_RAM");
+    if (dump && atoi(dump) == runs && strchr(dump, ':'))
+    {
+      auto& memory = Core::System::GetInstance().GetMemory();
+      if (FILE* f = fopen(strchr(dump, ':') + 1, "wb"))
+      {
+        fwrite(memory.GetRAM(), 1, memory.GetRamSizeReal(), f);
+        fclose(f);
+      }
+    }
+    runs++;
+  }
   Libretro::Input::InitSensors();
   Libretro::Options::CheckForUpdatedVariables();
   Libretro::FrameTiming::CheckForFastForwarding();
