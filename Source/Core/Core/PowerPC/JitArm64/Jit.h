@@ -354,6 +354,16 @@ protected:
   // Links: the slot of the exits to `destination` under the current feature flags (shape assigns
   // one and logs it; emit has them from the log), and a block's slot pointed at it once installed.
   u32 AotLinkSlot(u32 destination);
+  // Facts: the MMU's answers a block's code depends on, through these in every mode (the AOT
+  // form's compile records each, and its emit answers from the record), and whether a fact an
+  // image's block was compiled for holds now.
+  bool AotFact(JitArm64Aot::Fact kind, u32 a, u32 b, bool answer, u32* value = nullptr);
+  bool IsOptimizableRAMAddress(u32 address, u32 access_size);
+  bool IsOptimizableGatherPipeWrite(u32 address);
+  bool AotFactHolds(const u32* fact) const;
+  bool AotFactsHold(const JitArm64Aot::ImageBlock& ib) const;
+  bool LooksLikeSpeculativeConstant(u32 value) const;
+  bool AssumesNoPairedQuantize() const;
   void AotLink(const JitBlock& block);
   void AotAllocLinks();
   std::vector<u32> AotBlockHooks() const;

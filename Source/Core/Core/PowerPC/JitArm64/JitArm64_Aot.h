@@ -106,11 +106,25 @@ public:
   std::unordered_map<const void*, std::string> unresolved_seen;
 };
 
+// Facts (JitArm64_Aot.cpp, "Facts"): what a block's compile read of the machine's state besides
+// its words and hooks, each with the answer its code was compiled for. A fact is 4 words: kind,
+// a, b, answer.
+enum class Fact : u32
+{
+  Ram = 1,             // MMU::IsOptimizableRAMAddress(a, b)
+  GatherPipe = 2,      // MMU::IsOptimizableGatherPipeWrite(a)
+  SpeculateGate = 3,   // the block's address is not in noSpeculativeConstantsAddresses
+  Speculate = 4,       // GPR a looks like a gather pipe or MMIO constant; b its value when it does
+  PairedQuantize = 5,  // the block may assume its one GQR is 0
+  FifoWrite = 6,       // op address a is in fifoWriteAddresses (only answers of yes are kept)
+};
+
 struct ImageBlock
 {
-  u32 ea, feature_flags, nops, nhooks, code_off, code_len;
+  u32 ea, feature_flags, nops, nhooks, nfacts, code_off, code_len;
   const u32* ops;    // 2 * nops words: each op's address and instruction
   const u32* hooks;  // 2 * nhooks words: an op's address and its HLE hook index, where it has one
+  const u32* facts;  // 4 * nfacts words, in the order the compile asked them
 };
 
 struct State
@@ -133,6 +147,11 @@ struct State
   std::vector<u64> link_keys;
   std::unordered_map<u64, u32> link_slot_of;
   const u8* link_fallback = nullptr;
+  // Facts: the compile's, as it asks them (shape logs them); emit answers from its record's
+  std::vector<u32> facts;
+  const std::vector<u32>* emit_facts = nullptr;
+  size_t emit_fact = 0;
+  bool emit_facts_differ = false;
   struct
   {
     u64 compiled = 0, unresolved_blocks = 0, installs = 0, misses = 0, interp_blocks = 0,

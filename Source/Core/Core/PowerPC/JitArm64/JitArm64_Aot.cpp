@@ -10,13 +10,14 @@
 // ImageHeader, then u32 words: the routines' size, R_COUNT, the routine entry offsets
 // (JitArm64::AotRoutines's order, then the quantized tables'), the link count and each link's
 // ea and feature_flags (its slot is its index; "Links", below), then per block
-//   ea, feature_flags, nops, nhooks, code_off, code_len, ops[2 * nops] (each op's address and
-//   word), hooks[2 * nhooks] (each op address HLE hooks, and its hook index),
+//   ea, feature_flags, nops, nhooks, nfacts, code_off, code_len, ops[2 * nops] (each op's address
+//   and word), hooks[2 * nhooks] (each op address HLE hooks, and its hook index), facts[4 * nfacts]
+//   ("Facts", below),
 // the ops in the order the analyzer left them. A block's key is its address, feature flags, ops and
 // hooks: the hooks are the game's symbol state where it was compiled (HLE::GetHookByFunctionAddress),
 // which changes as the game runs, and they change the code. A load refuses an image unless each checked header
 // field is this core's (CheckHeader names the first that differs, with both values); a block is
-// installed only where the analyzer, run on live memory, gives exactly its ops.
+// installed only where the analyzer, run on live memory, gives exactly its ops, and its facts hold.
 
 #include "Core/PowerPC/JitArm64/JitArm64_Aot.h"
 
@@ -599,6 +600,99 @@ void JitArm64::AotUnlink(const JitBlock& block)
   }
 }
 
+// Facts. What a block compiles to depends, besides its words and hooks, on a few answers about the
+// machine's state when it is compiled: whether a constant address is plain RAM or the gather pipe
+// under the BATs (the MMU's IsOptimizable*; a BAT change clears the JIT's blocks), whether a GPR
+// looks like a gather pipe constant worth speculating on, and the JIT's history sets
+// (noSpeculativeConstantsAddresses, pairedQuantizeAddresses, fifoWriteAddresses). The JIT asks each
+// through AotFact. A shape run logs the answers with the block, in the order they were asked; the
+// emit answers each from the log, so it compiles the same code; and a load installs a block only
+// where every fact it was compiled for holds on the live state (AotFactsHold), as a compile there
+// would have answered. Only fifoWriteAddresses' yes answers are kept, one per op at most.
+bool JitArm64::AotFact(Fact kind, u32 a, u32 b, bool answer, u32* value)
+{
+  if (!m_aot)
+    return answer;
+  auto& facts = m_aot->facts;
+  if (m_aot->mode == Mode::Emit && m_aot->emit_facts)
+  {
+    const std::vector<u32>& logged = *m_aot->emit_facts;
+    if (kind == Fact::FifoWrite)
+    {
+      answer = false;
+      for (size_t i = 0; i < logged.size(); i += 4)
+        answer |= logged[i] == static_cast<u32>(kind) && logged[i + 1] == a;
+    }
+    else
+    {
+      size_t& i = m_aot->emit_fact;
+      while (i < logged.size() && logged[i] == static_cast<u32>(Fact::FifoWrite))
+        i += 4;
+      if (i + 4 > logged.size() || logged[i] != static_cast<u32>(kind) ||
+          logged[i + 1] != a || (kind != Fact::Speculate && logged[i + 2] != b))
+      {
+        m_aot->emit_facts_differ = true;
+        return answer;
+      }
+      answer = logged[i + 3] != 0;
+      b = logged[i + 2];
+      if (value)
+        *value = b;
+      i += 4;
+    }
+  }
+  if (kind == Fact::FifoWrite && !answer)
+    return false;
+  facts.insert(facts.end(), {static_cast<u32>(kind), a, kind == Fact::Speculate && !answer ? 0 : b,
+                             static_cast<u32>(answer)});
+  return answer;
+}
+
+bool JitArm64::AotFactHolds(const u32* f) const
+{
+  const u32 a = f[1], b = f[2];
+  const bool answer = f[3] != 0;
+  switch (static_cast<Fact>(f[0]))
+  {
+  case Fact::Ram:
+    return m_mmu.IsOptimizableRAMAddress(a, b) == answer;
+  case Fact::GatherPipe:
+    return m_mmu.IsOptimizableGatherPipeWrite(a) == answer;
+  case Fact::SpeculateGate:
+    return !js.noSpeculativeConstantsAddresses.contains(js.blockStart) == answer;
+  case Fact::Speculate:
+  {
+    const u32 v = m_ppc_state.gpr[a];
+    return LooksLikeSpeculativeConstant(v) == answer && (!answer || v == b);
+  }
+  case Fact::PairedQuantize:
+    return AssumesNoPairedQuantize() == answer;
+  case Fact::FifoWrite:
+    return js.fifoWriteAddresses.contains(a) == answer;
+  }
+  return false;
+}
+
+// The image block's facts on the live state, for the block code_block holds (js.blockStart is its
+// address): each holds, and no op address the JIT would ask about is in fifoWriteAddresses unless
+// the block was compiled with it there.
+bool JitArm64::AotFactsHold(const ImageBlock& ib) const
+{
+  u32 fifo_yes = 0;
+  for (u32 i = 0; i < ib.nfacts; i++)
+  {
+    if (!AotFactHolds(ib.facts + 4 * i))
+      return false;
+    fifo_yes += ib.facts[4 * i] == static_cast<u32>(Fact::FifoWrite);
+  }
+  if (js.fifoWriteAddresses.empty())
+    return fifo_yes == 0;
+  u32 fifo_live = 0;
+  for (u32 i = 0; i + 1 < ib.nops; i++)
+    fifo_live += js.fifoWriteAddresses.contains(ib.ops[2 * i]);
+  return fifo_live == fifo_yes;
+}
+
 void JitArm64::AotInit()
 {
   const Settings& cfg = GetSettings();
@@ -613,7 +707,7 @@ void JitArm64::AotInit()
   if (cfg.mode == Mode::Shape || cfg.mode == Mode::Emit)
     AllocCodeRegions(cfg.mode == Mode::Shape);
 
-  jo.optimizeGatherPipe = false;
+  jo.optimizeGatherPipe = true;
   SetBlockLinkingEnabled(false);
   SetOptimizationEnabled(true);
   gpr.Init(this);
@@ -796,14 +890,16 @@ bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
   m_aot->image_blocks.clear();
   for (u32 i = 0; i < got.nblocks; i++)
   {
-    if (end - w < 6)
+    if (end - w < 7)
       return refuse(fmt::format("blocks: the meta ends inside block {}", i));
-    ImageBlock b{w[0], w[1], w[2], w[3], w[4], w[5], w + 6, w + 6 + 2 * static_cast<u64>(w[2])};
-    if (static_cast<u64>(end - b.ops) < 2ULL * b.nops + 2ULL * b.nhooks ||
+    ImageBlock b{w[0], w[1], w[2], w[3], w[4], w[5], w[6], w + 7, nullptr, nullptr};
+    if (static_cast<u64>(end - b.ops) < 2ULL * b.nops + 2ULL * b.nhooks + 4ULL * b.nfacts ||
         static_cast<u64>(b.code_off) + b.code_len > got.code_size || b.code_off < routines_size)
       return refuse(fmt::format("blocks: block {} ({:08x}) is out of bounds", i, b.ea));
+    b.hooks = b.ops + 2 * b.nops;
+    b.facts = b.hooks + 2 * b.nhooks;
     m_aot->image_blocks.emplace(static_cast<u64>(b.feature_flags) << 32 | b.ea, b);
-    w = b.hooks + 2 * b.nhooks;
+    w = b.facts + 4 * b.nfacts;
   }
   m_aot->image_handle = handle;
   m_aot->image_code = code;
@@ -846,7 +942,8 @@ void JitArm64::AotMiss(u32 em_address)
     bool same = true;
     for (u32 i = 0; i < ib.nops && same; i++)
       same = ib.ops[2 * i] == m_code_buffer[i].address && ib.ops[2 * i + 1] == m_code_buffer[i].inst.hex;
-    if (!same)
+    js.blockStart = em_address;
+    if (!same || !AotFactsHold(ib))
       continue;
     JitBlock* b = blocks.AllocateBlock(em_address);
     b->normalEntry = const_cast<u8*>(m_aot->image_code + ib.code_off);
@@ -905,13 +1002,16 @@ void JitArm64::AotLogBlock(const JitBlock& b)
   if (m_aot->imports.unresolved_in_unit)
     m_aot->stats.unresolved_blocks++;
   const std::vector<u32> hooks = AotBlockHooks();
-  fprintf(m_aot->log, "B %08x %x %u %zu %016" PRIx64 " %u %zu", b.effectiveAddress,
+  const std::vector<u32>& facts = m_aot->facts;
+  fprintf(m_aot->log, "B %08x %x %u %zu %016" PRIx64 " %u %zu %zu", b.effectiveAddress,
           b.feature_flags, code_block.m_num_instructions, len, Fnv64(code, len),
-          m_aot->imports.unresolved_in_unit, hooks.size() / 2);
+          m_aot->imports.unresolved_in_unit, hooks.size() / 2, facts.size() / 4);
   for (u32 i = 0; i < code_block.m_num_instructions; i++)
     fprintf(m_aot->log, " %08x:%08x", m_code_buffer[i].address, m_code_buffer[i].inst.hex);
   for (size_t i = 0; i < hooks.size(); i += 2)
     fprintf(m_aot->log, " %08x:%x", hooks[i], hooks[i + 1]);
+  for (size_t i = 0; i < facts.size(); i += 4)
+    fprintf(m_aot->log, " %x:%08x:%x:%x", facts[i], facts[i + 1], facts[i + 2], facts[i + 3]);
   fputc('\n', m_aot->log);
   if (GetSettings().corrupt == b.effectiveAddress)
     AotDumpCode("shape", code, len);
@@ -958,19 +1058,19 @@ void JitArm64::AotEmit()
     u32 ea, ff, nops;
     size_t len;
     u64 hash;
-    u32 unresolved, nhooks;
-    std::vector<u32> ops, hooks;
+    u32 unresolved, nhooks, nfacts;
+    std::vector<u32> ops, hooks, facts;
   };
   std::vector<Rec> recs;
-  std::map<std::tuple<u32, u32, std::vector<u32>, std::vector<u32>>, size_t> seen;
+  std::map<std::tuple<u32, u32, std::vector<u32>, std::vector<u32>, std::vector<u32>>, size_t> seen;
   u32 dup_differs = 0, routines_differ = 0, malformed = 0, r_lines = 0, line_no = 0;
   std::string line;
   // Each line whole: a record cut short (a shape run that did not end) or with anything after its
   // fields is malformed, never read as far as it goes.
   auto parse_record = [](const char* p, Rec* r) {
     int n = 0;
-    if (sscanf(p, "B %x %x %u %zu %" SCNx64 " %u %u%n", &r->ea, &r->ff, &r->nops, &r->len,
-               &r->hash, &r->unresolved, &r->nhooks, &n) != 7)
+    if (sscanf(p, "B %x %x %u %zu %" SCNx64 " %u %u %u%n", &r->ea, &r->ff, &r->nops, &r->len,
+               &r->hash, &r->unresolved, &r->nhooks, &r->nfacts, &n) != 8)
       return false;
     p += n;
     auto pairs = [&p](std::vector<u32>* out, u32 count) {
@@ -986,6 +1086,15 @@ void JitArm64::AotEmit()
     };
     if (!pairs(&r->ops, r->nops) || !pairs(&r->hooks, r->nhooks))
       return false;
+    r->facts.resize(4 * static_cast<size_t>(r->nfacts));
+    for (u32 i = 0; i < r->nfacts; i++)
+    {
+      int m = 0;
+      u32* f = &r->facts[4 * i];
+      if (sscanf(p, " %x:%x:%x:%x%n", &f[0], &f[1], &f[2], &f[3], &m) != 4)
+        return false;
+      p += m;
+    }
     return strspn(p, " \r") == strlen(p);
   };
   while (std::getline(in, line))
@@ -1035,7 +1144,8 @@ void JitArm64::AotEmit()
       malformed++;
       continue;
     }
-    auto [it, fresh] = seen.emplace(std::make_tuple(r.ea, r.ff, r.ops, r.hooks), recs.size());
+    auto [it, fresh] =
+        seen.emplace(std::make_tuple(r.ea, r.ff, r.ops, r.hooks, r.facts), recs.size());
     if (!fresh)
     {
       if (recs[it->second].hash != r.hash || recs[it->second].len != r.len)
@@ -1067,7 +1177,13 @@ void JitArm64::AotEmit()
     m_mmu.SetAotFetchOverride(&words);
     HLE::SetAotHookOverride(&hooks);
     m_aot_last_block = nullptr;
+    m_aot->emit_facts = &r.facts;
+    m_aot->emit_fact = 0;
+    m_aot->emit_facts_differ = false;
     Jit(r.ea, false);
+    m_aot->emit_facts = nullptr;
+    // every fact the compile asked was the log's, in order, and it asked them all
+    const bool facts_differ = m_aot->emit_facts_differ || m_aot->facts != r.facts;
     m_mmu.SetAotFetchOverride(nullptr);
     HLE::SetAotHookOverride(nullptr);
     const JitBlock* b = m_aot_last_block;
@@ -1096,22 +1212,23 @@ void JitArm64::AotEmit()
       }
     }
     else if (len != r.len || Fnv64(bcode, len) != r.hash || m_aot->imports.unresolved_in_unit ||
-             r.unresolved)
+             r.unresolved || facts_differ)
     {
       AotDumpCode("emit", bcode, len);
       if (m_aot->imports.unresolved_in_unit || r.unresolved)
         unresolved++;
       else
         differs++;
-      fprintf(stderr, "JitArm64 AOT emit: %08x differs (%zu bytes against %zu)\n", r.ea, len,
-              r.len);
+      fprintf(stderr, "JitArm64 AOT emit: %08x differs (%zu bytes against %zu%s)\n", r.ea, len,
+              r.len, facts_differ ? "; its facts differ" : "");
     }
     const u32 off = static_cast<u32>(code.size());
     code.insert(code.end(), bcode, bcode + len);
     meta_blocks.insert(meta_blocks.end(),
-                       {r.ea, r.ff, r.nops, r.nhooks, off, static_cast<u32>(len)});
+                       {r.ea, r.ff, r.nops, r.nhooks, r.nfacts, off, static_cast<u32>(len)});
     meta_blocks.insert(meta_blocks.end(), r.ops.begin(), r.ops.end());
     meta_blocks.insert(meta_blocks.end(), r.hooks.begin(), r.hooks.end());
+    meta_blocks.insert(meta_blocks.end(), r.facts.begin(), r.facts.end());
   }
   m_ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(saved_ff);
 

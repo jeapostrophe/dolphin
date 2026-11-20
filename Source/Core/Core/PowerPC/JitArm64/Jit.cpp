@@ -422,9 +422,8 @@ void JitArm64::IntializeSpeculativeConstants()
   for (auto i : code_block.m_gpr_inputs)
   {
     u32 compile_time_value = m_ppc_state.gpr[i];
-    if (m_mmu.IsOptimizableGatherPipeWrite(compile_time_value) ||
-        m_mmu.IsOptimizableGatherPipeWrite(compile_time_value - 0x8000) ||
-        compile_time_value == 0xCC000000)
+    if (AotFact(JitArm64Aot::Fact::Speculate, i, compile_time_value,
+                LooksLikeSpeculativeConstant(compile_time_value), &compile_time_value))
     {
       if (!fail)
       {
@@ -1127,6 +1126,7 @@ void JitArm64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
     {
       m_aot->imports.unit_begin = near_start;
       m_aot->imports.unresolved_in_unit = 0;
+      m_aot->facts.clear();
     }
 
     JitBlock* b = blocks.AllocateBlock(em_address);
@@ -1259,6 +1259,33 @@ std::optional<size_t> JitArm64::SetEmitterStateToFreeCodeRegion()
   }
 }
 
+bool JitArm64::LooksLikeSpeculativeConstant(u32 value) const
+{
+  return m_mmu.IsOptimizableGatherPipeWrite(value) ||
+         m_mmu.IsOptimizableGatherPipeWrite(value - 0x8000) || value == 0xCC000000;
+}
+
+// Whether the block code_block holds may assume its one GQR is 0 (checked at its start)
+bool JitArm64::AssumesNoPairedQuantize() const
+{
+  if (code_block.m_gqr_used.Count() != 1 || js.pairedQuantizeAddresses.contains(js.blockStart))
+    return false;
+  const int gqr = *code_block.m_gqr_used.begin();
+  return !code_block.m_gqr_modified[gqr] && !GQR(m_ppc_state, gqr);
+}
+
+bool JitArm64::IsOptimizableRAMAddress(u32 address, u32 access_size)
+{
+  return AotFact(JitArm64Aot::Fact::Ram, address, access_size,
+                 m_mmu.IsOptimizableRAMAddress(address, access_size));
+}
+
+bool JitArm64::IsOptimizableGatherPipeWrite(u32 address)
+{
+  return AotFact(JitArm64Aot::Fact::GatherPipe, address, 0,
+                 m_mmu.IsOptimizableGatherPipeWrite(address));
+}
+
 bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 {
   auto& cpu = m_system.GetCPU();
@@ -1282,11 +1309,9 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
   if (IsProfilingEnabled())
     ABI_CallFunction(&JitBlock::ProfileData::BeginProfiling, b->profile_data.get());
 
-  if (!m_aot && code_block.m_gqr_used.Count() == 1 &&
-      !js.pairedQuantizeAddresses.contains(js.blockStart))
+  if (AotFact(JitArm64Aot::Fact::PairedQuantize, 0, 0, AssumesNoPairedQuantize()))
   {
     int gqr = *code_block.m_gqr_used.begin();
-    if (!code_block.m_gqr_modified[gqr] && !GQR(m_ppc_state, gqr))
     {
       LDR(IndexType::Unsigned, ARM64Reg::W0, PPC_REG, PPCSTATE_OFF_SPR(SPR_GQR0 + gqr));
       FixupBranch no_fail = CBZ(ARM64Reg::W0);
@@ -1309,7 +1334,8 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
   m_constant_propagation.Clear();
 
-  if (!m_aot && !js.noSpeculativeConstantsAddresses.contains(js.blockStart))
+  if (AotFact(JitArm64Aot::Fact::SpeculateGate, 0, 0,
+              !js.noSpeculativeConstantsAddresses.contains(js.blockStart)))
   {
     IntializeSpeculativeConstants();
   }
@@ -1340,7 +1366,8 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     {
       // Gather pipe writes using a non-immediate address are discovered by profiling.
       const u32 prev_address = m_code_buffer[i - 1].address;
-      bool gatherPipeIntCheck = js.fifoWriteAddresses.contains(prev_address);
+      bool gatherPipeIntCheck = AotFact(JitArm64Aot::Fact::FifoWrite, prev_address, 0,
+                                        js.fifoWriteAddresses.contains(prev_address));
 
       if (jo.optimizeGatherPipe &&
           (js.fifoBytesSinceCheck >= GPFifo::GATHER_PIPE_SIZE || js.mustCheckFifo))
