@@ -660,9 +660,19 @@ void JitArm64::AotLink(const JitBlock& block)
     m_aot->link_table[it->second] = block.normalEntry;
 }
 
+// Lane-only (retro-trainer hh34d, never for a pinned core): DOLPHIN_AOT_RED names checks to
+// skip, for red receipts: "nounlink" (a destroyed block keeps its link slot), "nofacts" (an image
+// block is installed whatever its facts say).
+static bool Red(const char* what)
+{
+  const char* red = getenv("DOLPHIN_AOT_RED");
+  return red && strstr(red, what);
+}
+
 void JitArm64::AotUnlink(const JitBlock& block)
 {
-  if (!m_aot || !m_aot->link_table)
+  static const bool red = Red("nounlink");
+  if (!m_aot || !m_aot->link_table || red)
     return;
   const u64 key = static_cast<u64>(block.feature_flags) << 32 | block.effectiveAddress;
   if (const auto it = m_aot->link_slot_of.find(key);
@@ -751,6 +761,9 @@ bool JitArm64::AotFactHolds(const u32* f) const
 // the block was compiled with it there.
 bool JitArm64::AotFactsHold(const ImageBlock& ib) const
 {
+  static const bool red = Red("nofacts");
+  if (red)
+    return true;
   u32 fifo_yes = 0;
   for (u32 i = 0; i < ib.nfacts; i++)
   {
