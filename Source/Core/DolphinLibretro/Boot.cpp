@@ -661,6 +661,16 @@ bool retro_load_game(const struct retro_game_info* game)
 #ifdef _M_ARM_64
   ConfigureAot();
 #endif
+  // Lane-only (retro-trainer HH-34, never for a pinned core): the Wii's clock at boot from
+  // DOLPHIN_RTC (seconds), so two runs started at different times can be compared frame by frame.
+  // Lane-only, likewise: DOLPHIN_FPRF=1 gives the stock JIT the AOT form's FPRF, to compare them.
+  if (const char* fprf = getenv("DOLPHIN_FPRF"); fprf && *fprf == '1')
+    Config::SetBase(Config::MAIN_FPRF, true);
+  if (const char* rtc = getenv("DOLPHIN_RTC"); rtc && *rtc)
+  {
+    Config::SetBase(Config::MAIN_CUSTOM_RTC_ENABLE, true);
+    Config::SetBase(Config::MAIN_CUSTOM_RTC_VALUE, static_cast<u32>(strtoul(rtc, nullptr, 10)));
+  }
   NOTICE_LOG_FMT(BOOT, "CPU Core: {}", Libretro::Options::CPUCoreToString(Config::Get(Config::MAIN_CPU_CORE)));
   NOTICE_LOG_FMT(BOOT, "Fastmem enabled = {}", (Config::Get(Config::MAIN_FASTMEM)) ? "Yes" : "No");
   NOTICE_LOG_FMT(BOOT, "JIT debug enabled = {}", Config::IsDebuggingEnabled() ? "Yes" : "No");
