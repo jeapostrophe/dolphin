@@ -235,6 +235,9 @@ public:
   // answer no), and JitBase::IsAotForm reads it.
   void SetAotForm(bool aot_form) { m_aot_form = aot_form; }
   bool IsAotForm() const { return m_aot_form; }
+  // Lane-only (hh34d): JitArm64Aot::RESTORE_* bits a shape run turned back on.
+  void SetAotRestore(u32 restore) { m_aot_restore = restore; }
+  u32 GetAotRestore() const { return m_aot_restore; }
 
   template <std::unsigned_integral T>
   T Read(const u32 address);
@@ -380,6 +383,7 @@ private:
 
   const std::unordered_map<u32, u32>* m_aot_fetch = nullptr;
   bool m_aot_form = false;
+  u32 m_aot_restore = 0;
   BatTable m_ibat_table;
   BatTable m_dbat_table;
 };

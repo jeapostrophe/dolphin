@@ -79,6 +79,8 @@ void JitArm64::AllocCodeRegions(bool executable)
 void JitArm64::Init()
 {
   m_mmu.SetAotForm(JitArm64Aot::Active());
+  m_aot_restore = JitArm64Aot::Active() ? JitArm64Aot::GetSettings().restore : 0;
+  m_mmu.SetAotRestore(m_aot_restore);
   if (JitArm64Aot::Active())
   {
     AotInit();
@@ -109,7 +111,8 @@ void JitArm64::Init()
 
 void JitArm64::SetBlockLinkingEnabled(bool enabled)
 {
-  jo.enableBlocklink = enabled && !SConfig::GetInstance().bJITNoBlockLinking && !m_aot;
+  jo.enableBlocklink = enabled && !SConfig::GetInstance().bJITNoBlockLinking &&
+                       (!m_aot || (m_aot_restore & JitArm64Aot::RESTORE_LINK));
 }
 
 void JitArm64::SetOptimizationEnabled(bool enabled)
@@ -543,6 +546,7 @@ void JitArm64::MSRUpdated(ARM64Reg msr)
 void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return,
                          ARM64Reg exit_address_after_return_reg)
 {
+  AotDirectExit aot_direct(this);
   Cleanup();
   if (IsProfilingEnabled())
   {
@@ -551,7 +555,7 @@ void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return
   }
   DoDownCount();
 
-  if (m_aot)
+  if (m_aot && !(m_aot_restore & JitArm64Aot::RESTORE_LINK))
   {
     // No link: the exit goes to the dispatcher, which reads the flags DoDownCount set.
     MOVI2R(DISPATCHER_PC, destination);
@@ -653,6 +657,7 @@ void JitArm64::WriteExit(u32 destination, bool LK, u32 exit_address_after_return
 void JitArm64::WriteExit(Arm64Gen::ARM64Reg dest, bool LK, u32 exit_address_after_return,
                          ARM64Reg exit_address_after_return_reg)
 {
+  AotDirectExit aot_direct(this);
   if (dest != DISPATCHER_PC)
     MOV(DISPATCHER_PC, dest);
 
@@ -729,6 +734,7 @@ void JitArm64::WriteExit(Arm64Gen::ARM64Reg dest, bool LK, u32 exit_address_afte
 
 void JitArm64::FakeLKExit(u32 exit_address_after_return, ARM64Reg exit_address_after_return_reg)
 {
+  AotDirectExit aot_direct(this);
   if (!m_enable_blr_optimization)
     return;
 
@@ -816,6 +822,7 @@ void JitArm64::FakeLKExit(u32 exit_address_after_return, ARM64Reg exit_address_a
 
 void JitArm64::WriteBLRExit(Arm64Gen::ARM64Reg dest)
 {
+  AotDirectExit aot_direct(this);
   if (!m_enable_blr_optimization)
   {
     WriteExit(dest);
@@ -1266,7 +1273,7 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
   if (IsProfilingEnabled())
     ABI_CallFunction(&JitBlock::ProfileData::BeginProfiling, b->profile_data.get());
 
-  if (!m_aot && code_block.m_gqr_used.Count() == 1 &&
+  if ((!m_aot || (m_aot_restore & JitArm64Aot::RESTORE_GQR)) && code_block.m_gqr_used.Count() == 1 &&
       !js.pairedQuantizeAddresses.contains(js.blockStart))
   {
     int gqr = *code_block.m_gqr_used.begin();
@@ -1293,7 +1300,8 @@ bool JitArm64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
   m_constant_propagation.Clear();
 
-  if (!m_aot && !js.noSpeculativeConstantsAddresses.contains(js.blockStart))
+  if ((!m_aot || (m_aot_restore & JitArm64Aot::RESTORE_SPECCONST)) &&
+      !js.noSpeculativeConstantsAddresses.contains(js.blockStart))
   {
     IntializeSpeculativeConstants();
   }

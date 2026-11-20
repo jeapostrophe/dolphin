@@ -89,6 +89,42 @@ bool ParseMode(const char* text, Mode* mode)
   return false;
 }
 
+u32 ParseRestore(const char* text)
+{
+  static const std::pair<const char*, u32> names[] = {
+      {"far", RESTORE_FAR},         {"link", RESTORE_LINK},         {"blr", RESTORE_BLR},
+      {"fastmem", RESTORE_FASTMEM}, {"specconst", RESTORE_SPECCONST}, {"gqr", RESTORE_GQR},
+      {"gpipe", RESTORE_GPIPE},     {"constaddr", RESTORE_CONSTADDR}, {"vloader", RESTORE_VLOADER},
+      {"imports", RESTORE_IMPORTS}, {"entrymap", RESTORE_ENTRYMAP},   {"all", 0x7ff}};
+  u32 bits = 0;
+  std::string s(text);
+  size_t i = 0;
+  while (i <= s.size())
+  {
+    const size_t j = std::min(s.find(',', i), s.size());
+    const std::string name = s.substr(i, j - i);
+    if (!name.empty())
+    {
+      bool found = false;
+      for (const auto& [n, b] : names)
+        if (name == n)
+          bits |= b, found = true;
+      if (!found)
+      {
+        fprintf(stderr, "DOLPHIN_AOT_RESTORE: no optimization %s\n", name.c_str());
+        std::exit(2);
+      }
+    }
+    i = j + 1;
+  }
+  // stock's exits need far code (their unlinked path is there), and the BLR optimization links
+  if (bits & RESTORE_BLR)
+    bits |= RESTORE_LINK;
+  if (bits & RESTORE_LINK)
+    bits |= RESTORE_FAR;
+  return bits;
+}
+
 void Configure(const Settings& settings)
 {
   s_settings = settings;
@@ -581,15 +617,18 @@ void JitArm64::AotInit()
   m_aot->mode = cfg.mode;
 
   // No fastmem arena (InitFastmemArena is not called), so no fastmem (JitBase::RefreshConfig)
-  jo.fastmem_arena = false;
+  if (cfg.restore & RESTORE_FASTMEM)
+    InitFastmemArena();
+  else
+    jo.fastmem_arena = false;
   RefreshConfig();
 
   // shape: the JIT's MAP_JIT cache; emit: plain memory, never executed
   if (cfg.mode == Mode::Shape || cfg.mode == Mode::Emit)
     AllocCodeRegions(cfg.mode == Mode::Shape);
 
-  jo.optimizeGatherPipe = false;
-  SetBlockLinkingEnabled(false);
+  jo.optimizeGatherPipe = (cfg.restore & RESTORE_GPIPE) != 0;
+  SetBlockLinkingEnabled((cfg.restore & RESTORE_LINK) != 0);
   SetOptimizationEnabled(true);
   gpr.Init(this);
   fpr.Init(this);
@@ -598,9 +637,15 @@ void JitArm64::AotInit()
   code_block.m_gpa = &js.gpa;
   code_block.m_fpa = &js.fpa;
   InitBLROptimization();
+  if (!(cfg.restore & RESTORE_BLR))
+    m_enable_blr_optimization = false;
+  if (cfg.restore)
+    fprintf(stderr, "JitArm64 AOT: shape restores %#x (blocklink %d, blr %d, fastmem %d)\n",
+            cfg.restore, jo.enableBlocklink, m_enable_blr_optimization, jo.fastmem);
 
   AotRegisterImports();
-  SetAotResolver(&m_aot->imports);
+  if (!(cfg.restore & RESTORE_IMPORTS))
+    SetAotResolver(&m_aot->imports);
 
   if (cfg.mode == Mode::Shape || cfg.mode == Mode::Emit)
   {

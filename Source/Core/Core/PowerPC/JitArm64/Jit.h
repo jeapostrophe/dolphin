@@ -217,7 +217,7 @@ protected:
   // (a block's code must be one range): what would go there is emitted inline and branched over.
   void SwitchToFarCode()
   {
-    if (m_aot)
+    if (m_aot && !(m_aot_restore & JitArm64Aot::RESTORE_FAR))
     {
       m_aot_far_skip = B();
       m_in_far_code = true;
@@ -234,7 +234,7 @@ protected:
 
   void SwitchToNearCode()
   {
-    if (m_aot)
+    if (m_aot && !(m_aot_restore & JitArm64Aot::RESTORE_FAR))
     {
       SetJumpTarget(m_aot_far_skip);
       m_in_far_code = false;
@@ -360,6 +360,27 @@ protected:
   const u8** QuantizedTable(int which);
 
   std::unique_ptr<JitArm64Aot::State> m_aot;
+  // Lane-only (hh34d): JitArm64Aot::Settings::restore. With RESTORE_LINK, an exit writer emits
+  // stock's exits, without the import resolver (AotDirectExit).
+  u32 m_aot_restore = 0;
+  struct AotDirectExit
+  {
+    explicit AotDirectExit(JitArm64* jit)
+        : jit(jit), saved(jit->GetAotResolver()),
+          on(jit->m_aot && (jit->m_aot_restore & JitArm64Aot::RESTORE_LINK))
+    {
+      if (on)
+        jit->SetAotResolver(nullptr);
+    }
+    ~AotDirectExit()
+    {
+      if (on)
+        jit->SetAotResolver(saved);
+    }
+    JitArm64* jit;
+    Arm64Gen::AotImportResolver* saved;
+    bool on;
+  };
   std::unique_ptr<CachedInterpreter> m_aot_ci;
   bool m_aot_refused = false;
   JitBlock* m_aot_last_block = nullptr;

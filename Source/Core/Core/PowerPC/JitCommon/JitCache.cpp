@@ -58,7 +58,8 @@ void JitBaseBlockCache::Init()
 
   m_entry_points_ptr = nullptr;
 #if defined(_ARCH_64) && !defined(IPHONEOS)
-  if (Config::Get(Config::MAIN_LARGE_ENTRY_POINTS_MAP) && !m_jit.IsAotForm())
+  if (Config::Get(Config::MAIN_LARGE_ENTRY_POINTS_MAP) &&
+      (!m_jit.IsAotForm() || (m_jit.m_mmu.GetAotRestore() & 1024)))
     m_entry_points_ptr = static_cast<u8**>(m_entry_points_arena.Create(FAST_BLOCK_MAP_SIZE));
 #endif
 

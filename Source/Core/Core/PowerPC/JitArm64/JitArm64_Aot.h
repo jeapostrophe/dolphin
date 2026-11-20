@@ -59,9 +59,30 @@ struct Settings
   std::string log;        // DOLPHIN_AOT_LOG; shape: the block log it writes; emit: the one it reads
   std::string core_uuid;  // DOLPHIN_AOT_CORE_UUID; emit: the LC_UUID of the build that will load
                           // the image (the emitting build's own when empty)
+  // Lane-only (retro-trainer hh34d, never for a pinned core): DOLPHIN_AOT_RESTORE, a comma list of
+  // the optimizations the form turns off, turned back on in shape (the code is then unsaveable),
+  // to measure what each costs. RESTORE_* below; "all" is every one.
+  u32 restore = 0;
   u32 corrupt = 0;  // DOLPHIN_AOT_CORRUPT (hex); emit: this block's code gets one instruction
                     // changed (a red receipt)
 };
+
+enum : u32
+{
+  RESTORE_FAR = 1,
+  RESTORE_LINK = 2,
+  RESTORE_BLR = 4,
+  RESTORE_FASTMEM = 8,
+  RESTORE_SPECCONST = 16,
+  RESTORE_GQR = 32,
+  RESTORE_GPIPE = 64,
+  RESTORE_CONSTADDR = 128,
+  RESTORE_VLOADER = 256,
+  RESTORE_IMPORTS = 512,
+  RESTORE_ENTRYMAP = 1024,
+};
+// DOLPHIN_AOT_RESTORE's names to bits; exits 2 on a name it does not know.
+u32 ParseRestore(const char* text);
 
 // "shape", "emit", "load", "interp"; false for anything else.
 bool ParseMode(const char* text, Mode* mode);

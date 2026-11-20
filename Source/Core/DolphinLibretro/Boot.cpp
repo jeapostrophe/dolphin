@@ -70,6 +70,8 @@ static void ConfigureAot()
     settings.log = env("DOLPHIN_AOT_LOG");
     settings.core_uuid = env("DOLPHIN_AOT_CORE_UUID");
     settings.corrupt = static_cast<u32>(strtoul(env("DOLPHIN_AOT_CORRUPT").c_str(), nullptr, 16));
+    if (settings.mode == JitArm64Aot::Mode::Shape)
+      settings.restore = JitArm64Aot::ParseRestore(env("DOLPHIN_AOT_RESTORE").c_str());
   }
   else
   {
@@ -84,7 +86,8 @@ static void ConfigureAot()
   if (settings.mode == JitArm64Aot::Mode::Off)
     return;
   Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::JITARM64);
-  Config::SetBase(Config::GFX_VERTEX_LOADER_TYPE, VertexLoaderType::Software);
+  if (!(settings.restore & JitArm64Aot::RESTORE_VLOADER))
+    Config::SetBase(Config::GFX_VERTEX_LOADER_TYPE, VertexLoaderType::Software);
   // FPSCR's FPRF as the interpreter computes it, so a miss the Cached Interpreter runs leaves FPRF
   // as the image's code would; the rest of FPSCR, and CR's SO bits, it does not (JitArm64_Aot.h)
   Config::SetBase(Config::MAIN_FPRF, true);
