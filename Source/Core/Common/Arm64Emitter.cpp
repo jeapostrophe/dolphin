@@ -817,8 +817,9 @@ void ARM64XEmitter::AotLoadImport(ARM64Reg Rd, const void* target, const char* w
   if (slot < 0)
   {
     m_aot->Unresolved(target, what);
-    // MOVZ/MOVK only (m_aot keeps MOVI2R off ADR/ADRP): the code works, and its bytes differ
-    // from any other process's, so an emit refuses the block.
+    // The address whole, in one to four MOVZ/MOVK (m_aot keeps MOVI2R off ADR/ADRP): right in
+    // this process, so a shape run goes on and reports the site, and its bytes differ from any
+    // other process's, so an emit refuses the block.
     MOVI2R(EncodeRegTo64(Rd), reinterpret_cast<uintptr_t>(target));
     return;
   }
@@ -850,10 +851,11 @@ void ARM64XEmitter::B(CCFlags cond, const void* ptr)
 {
   if (AotOutsideUnit(m_aot, ptr, m_code))
   {
-    // Not taken: over the two instructions that take it through the import slot.
-    Write32((0x54 << 24) | (MaskImm19(3) << 5) | (static_cast<u32>(cond) ^ 1));
-    if (AotBranch(ptr, false, "B.cond"))
-      return;
+    // Not taken: over what takes it through the import slot, however long AotLoadImport made it.
+    const FixupBranch not_taken = B(static_cast<CCFlags>(static_cast<u32>(cond) ^ 1));
+    AotBranch(ptr, false, "B.cond");
+    SetJumpTarget(not_taken);
+    return;
   }
   s64 distance = (s64)ptr - (s64)m_code;
 
@@ -1956,10 +1958,12 @@ void ARM64XEmitter::MOVI2RImpl(ARM64Reg Rd, T imm)
   const u64 adrp_base = (pc & ~0xFFF) + adrp_offset;
   const u64 adr_base = pc + adr_offset;
   if constexpr (sizeof(T) == 8)
-    if (!m_aot)
   {
-    try_base(adrp_base, Approach::ADRPBase, false);
-    try_base(adr_base, Approach::ADRBase, false);
+    if (!m_aot)  // a PC-relative base depends on where the code sits
+    {
+      try_base(adrp_base, Approach::ADRPBase, false);
+      try_base(adr_base, Approach::ADRBase, false);
+    }
   }
 
   // Try ORR (or skip it if we already have a 1-instruction encoding - these tests are non-trivial)

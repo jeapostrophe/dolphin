@@ -165,8 +165,6 @@ protected:
   bool m_accurate_cpu_cache_enabled = false;
 
   bool m_enable_blr_optimization = false;
-  // JitArm64's AOT form (JitArm64_Aot.h): no fastmem, no large entry points map.
-  bool m_aot_form = false;
   bool m_cleanup_after_stackfault = false;
   u8* m_stack_guard = nullptr;
 
@@ -204,7 +202,9 @@ public:
 
   bool IsProfilingEnabled() const { return m_enable_profiling && m_enable_debugging; }
   bool IsDebuggingEnabled() const { return m_enable_debugging; }
-  bool IsAotForm() const { return m_aot_form; }
+  // JitArm64's AOT form (JitArm64_Aot.h), and the Cached Interpreter that runs its image's misses:
+  // the MMU's flag (MMU::SetAotForm), so every JIT in the process answers alike.
+  bool IsAotForm() const;
   bool IsBranchWatchEnabled() const
   {
     auto& branch_watch = m_system.GetPowerPC().GetBranchWatch();

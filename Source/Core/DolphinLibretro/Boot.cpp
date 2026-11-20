@@ -49,11 +49,8 @@
 namespace fs = std::filesystem;
 
 #ifdef _M_ARM_64
-// JitArm64's AOT form (JitArm64_Aot.h; retro-trainer HH-34). The Mac's tooling names a mode in
-// DOLPHIN_AOT (shape, emit, load, interp), with DOLPHIN_AOT_IMAGE, DOLPHIN_AOT_LOG,
-// DOLPHIN_AOT_CORE_UUID and DOLPHIN_AOT_CORRUPT; otherwise the frontend's rt_aot_image option
-// names an image, run in interp. Either runs JitArm64, which in load and interp maps no code, on
-// the software vertex loader (the vertex loader JIT is the other writer of code).
+// JitArm64's AOT form (retro-trainer HH-34): its modes, their environment and the rt_aot_image
+// option are JitArm64_Aot.h's.
 static void ConfigureAot()
 {
   JitArm64Aot::Settings settings;
@@ -87,12 +84,9 @@ static void ConfigureAot()
   if (settings.mode == JitArm64Aot::Mode::Off)
     return;
   Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::JITARM64);
-  Config::SetBase(Config::MAIN_FASTMEM, false);
-  Config::SetBase(Config::MAIN_FASTMEM_ARENA, false);
-  Config::SetBase(Config::MAIN_LARGE_ENTRY_POINTS_MAP, false);
   Config::SetBase(Config::GFX_VERTEX_LOADER_TYPE, VertexLoaderType::Software);
-  // FPSCR's result flags as the interpreter computes them, so a block the image lacks, run on the
-  // Cached Interpreter, leaves FPSCR as the image's code would
+  // FPSCR's FPRF as the interpreter computes it, so a miss the Cached Interpreter runs leaves FPRF
+  // as the image's code would; the rest of FPSCR, and CR's SO bits, it does not (JitArm64_Aot.h)
   Config::SetBase(Config::MAIN_FPRF, true);
 }
 #endif

@@ -868,6 +868,9 @@ std::optional<ReadResult<std::string>> MMU::HostTryReadString(const Core::CPUThr
 
 bool MMU::IsOptimizableRAMAddress(const u32 address, const u32 access_size) const
 {
+  if (m_aot_form)
+    return false;
+
   if (m_power_pc.GetMemChecks().HasAny())
     return false;
 
@@ -1159,6 +1162,9 @@ void MMU::TouchDCacheLine(u32 address, bool store)
 
 u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
 {
+  if (m_aot_form)
+    return 0;
+
   if (m_power_pc.GetMemChecks().HasAny())
     return 0;
 
@@ -1185,6 +1191,9 @@ u32 MMU::IsOptimizableMMIOAccess(u32 address, u32 access_size) const
 
 bool MMU::IsOptimizableGatherPipeWrite(u32 address) const
 {
+  if (m_aot_form)
+    return false;
+
   if (m_power_pc.GetMemChecks().HasAny())
     return false;
 

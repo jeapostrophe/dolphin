@@ -40,7 +40,7 @@ void CachedInterpreter::Init()
   ResetFreeMemoryRanges();
 
   jo.enableBlocklink = false;
-  if (m_jit_timed)
+  if (m_jit_timing)
   {
     // JitArm64::SetOptimizationEnabled(true)'s options: its blocks are these
     analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
@@ -468,12 +468,9 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
       {
         const InterpretOperands operands = {interpreter, Interpreter::GetInterpreterOp(op.inst),
                                             js.compilerPC, op.inst};
-        const PPCAnalyst::CodeOp* next = &op + 1;
-        if (m_jit_timed && (m_jit_op(op) & JIT_OP_DCBX) && op.inst.RA == 0 && op.inst.RB != 0 &&
-            CanMergeNextInstructions(2) && (next[0].inst.hex & 0xfc00'ffff) == 0x38000020 &&
-            next[0].inst.RA_6 == op.inst.RB && next[0].inst.RD_2 == op.inst.RB &&
-            next[1].inst.hex == 0x4200fff8)
+        if (m_jit_timing && m_jit_timing->BatchesDcbxLoop(&op, CanMergeNextInstructions(2)))
         {
+          const PPCAnalyst::CodeOp* next = &op + 1;
           Write(DcbxLoop, {operands, op.inst.RB,
                            static_cast<u32>(op.opinfo->num_cycles + next[0].opinfo->num_cycles +
                                             next[1].opinfo->num_cycles)});
@@ -487,11 +484,11 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
       if (op.branchIsIdleLoop)
         Write(CheckIdle, {m_system.GetCoreTiming(), js.blockStart});
-      const u32 exit_kind =
-          m_jit_timed && op.canEndBlock ?
-              (op.branchIsIdleLoop ? u32{JIT_EXIT_EXCEPTIONS} : m_jit_op(op) & JIT_EXIT_MASK) :
-              u32{JIT_EXIT_PLAIN};
-      if (exit_kind != JIT_EXIT_PLAIN)
+      const JitTiming::Exit exit_kind =
+          m_jit_timing && op.canEndBlock ?
+              (op.branchIsIdleLoop ? JitTiming::Exit::Exceptions : m_jit_timing->ExitAfter(op)) :
+              JitTiming::Exit::Plain;
+      if (exit_kind != JitTiming::Exit::Plain)
       {
         // JitArm64's FallBackToInterpreter goes on past an op that left npc at the next word
         const u32 next_pc = js.instructionsLeft == 0 ? 0 : op.address + 4;
@@ -499,12 +496,12 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
             {js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst},
             m_system.GetPowerPC(),
             next_pc};
-        Write(exit_kind == JIT_EXIT_EXTERNAL_EXCEPTIONS ?
+        Write(exit_kind == JitTiming::Exit::ExternalExceptions ?
                   CallbackCast(EndBlockCheckExceptions<true>) :
                   CallbackCast(EndBlockCheckExceptions<false>),
               operands);
       }
-      else if (op.canEndBlock && m_jit_timed && js.instructionsLeft > 0)
+      else if (op.canEndBlock && m_jit_timing && js.instructionsLeft > 0)
       {
         // Not the block's last op: an unconditional branch here is one the analyzer followed,
         // which JitArm64 compiles to no exit at all; anything else (a conditional branch, a trap)
@@ -522,15 +519,9 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
         WriteEndBlock();
       }
 
-      // JitArm64::dcbt: a dcbst of the same address right after it is skipped (no invalidation,
-      // and its cycles never charged)
-      if (m_jit_timed && op.inst.OPCD == 31 && op.inst.SUBOP10 == 278 &&
-          CanMergeNextInstructions(1) && js.op[1].inst.OPCD == 31 &&
-          js.op[1].inst.SUBOP10 == 54 && js.op[1].inst.RA == op.inst.RA &&
-          js.op[1].inst.RB == op.inst.RB)
-      {
+      // The op after it skipped (no invalidation, and its cycles never charged)
+      if (m_jit_timing && m_jit_timing->SkipsNextOp(&op, CanMergeNextInstructions(1)))
         i++;
-      }
     }
   }
   if (code_block.m_broken)

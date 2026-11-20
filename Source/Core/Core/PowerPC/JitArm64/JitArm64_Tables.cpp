@@ -3,8 +3,6 @@
 
 #include "Core/PowerPC/JitArm64/Jit.h"
 
-#include "Core/PowerPC/CachedInterpreter/CachedInterpreter.h"
-
 #include <array>
 
 #include "Common/Assert.h"
@@ -476,9 +474,8 @@ void JitArm64::DynaRunTable63(UGeckoInstruction inst)
   (this->*s_dyna_op_table63[inst.SUBOP10])(inst);
 }
 
-u32 JitArm64::AotExitKind(const PPCAnalyst::CodeOp& op)
+JitArm64::Instruction JitArm64::OpHandler(UGeckoInstruction inst)
 {
-  const UGeckoInstruction inst = op.inst;
   Instruction f = s_dyna_op_table[inst.OPCD];
   if (f == &JitArm64::DynaRunTable4)
     f = s_dyna_op_table4[inst.SUBOP10];
@@ -490,13 +487,47 @@ u32 JitArm64::AotExitKind(const PPCAnalyst::CodeOp& op)
     f = s_dyna_op_table59[inst.SUBOP5];
   else if (f == &JitArm64::DynaRunTable63)
     f = s_dyna_op_table63[inst.SUBOP10];
-  if (f == &JitArm64::FallBackToInterpreter || f == &JitArm64::rfi)
-    return CachedInterpreter::JIT_EXIT_EXCEPTIONS;
+  return f;
+}
+
+// An op the JIT runs on the interpreter (FallBackToInterpreter) leaves the block through
+// WriteExceptionExit; so do rfi's and mtmsr's own code, the latter taking external exceptions
+// only. Which ops fall back is their table entry, or, for the ops that can end a block, their
+// handler's JITDISABLE and FALLBACK_IF under this op and these settings, as each states.
+JitTiming::Exit JitArm64::ExitAfter(const PPCAnalyst::CodeOp& op) const
+{
+  const UGeckoInstruction inst = op.inst;
+  const Instruction f = OpHandler(inst);
+  const bool branch_off = bJITOff || bJITBranchOff;
+  const bool system_off = bJITOff || bJITSystemRegistersOff;
+  bool falls_back = f == &JitArm64::FallBackToInterpreter;
+  if (f == &JitArm64::sc || f == &JitArm64::rfi || f == &JitArm64::bx || f == &JitArm64::bcx ||
+      f == &JitArm64::bclrx)
+  {
+    falls_back = branch_off;
+  }
+  else if (f == &JitArm64::bcctrx)
+  {
+    falls_back = branch_off || !(inst.BO_2 & BO_DONT_CHECK_CONDITION);
+  }
+  else if (f == &JitArm64::twx)
+  {
+    falls_back = system_off;
+  }
+  else if (f == &JitArm64::mtmsr)
+  {
+    falls_back = system_off || jo.fp_exceptions;
+  }
+  else if (f == &JitArm64::mtspr)
+  {
+    // it can end a block only as a write of MMCR0 or MMCR1, which it falls back on
+    falls_back = true;
+  }
+  if (falls_back || f == &JitArm64::rfi)
+    return Exit::Exceptions;
   if (f == &JitArm64::mtmsr)
-    return CachedInterpreter::JIT_EXIT_EXTERNAL_EXCEPTIONS;
-  if (f == &JitArm64::dcbx)
-    return CachedInterpreter::JIT_EXIT_PLAIN | CachedInterpreter::JIT_OP_DCBX;
-  return CachedInterpreter::JIT_EXIT_PLAIN;
+    return Exit::ExternalExceptions;
+  return Exit::Plain;
 }
 
 void JitArm64::CompileInstruction(PPCAnalyst::CodeOp& op)

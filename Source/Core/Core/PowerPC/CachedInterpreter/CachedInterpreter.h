@@ -9,6 +9,7 @@
 #include "Common/RangeSizeSet.h"
 #include "Core/PowerPC/CachedInterpreter/CachedInterpreterBlockCache.h"
 #include "Core/PowerPC/CachedInterpreter/CachedInterpreterEmitter.h"
+#include "Core/PowerPC/CachedInterpreter/JitTiming.h"
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/PPCAnalyst.h"
 
@@ -58,26 +59,10 @@ public:
   const CommonAsmRoutinesBase* GetAsmRoutines() override { return nullptr; }
 
   // JitArm64's AOT interp runs the blocks its image lacks here, charged as JitArm64 charges them
-  // (retro-trainer HH-34): blocks formed with the JIT's analyzer options, and a block that goes on
-  // past a branch (a followed one, or a conditional one not taken) ends only where JitArm64's
-  // would, when the branch goes elsewhere than the next word. Set before Init.
-  // `jit_op` says what JitArm64 makes of an op: how it leaves a block after one that can end
-  // it (JIT_EXIT_MASK: a plain exit, one that first takes every pending exception, or external
-  // ones only), and whether it is its dcbx, which runs a dcbx/addi/bdnz loop's iterations at once.
-  enum JitOp : u32
-  {
-    JIT_EXIT_PLAIN,
-    JIT_EXIT_EXCEPTIONS,
-    JIT_EXIT_EXTERNAL_EXCEPTIONS,
-    JIT_EXIT_MASK = 3,
-    JIT_OP_DCBX = 4,
-  };
-  void SetJitTimed(bool jit_timed, u32 (*jit_op)(const PPCAnalyst::CodeOp& op))
-  {
-    m_jit_timed = jit_timed;
-    m_aot_form = jit_timed;  // and flag merging, as there, never depends on stepping
-    m_jit_op = jit_op;
-  }
+  // (retro-trainer HH-34): blocks formed with the JIT's analyzer options, a block that goes on past
+  // a branch (a followed one, or a conditional one not taken) ending only where JitArm64's would,
+  // and the exits, dcbx loops and skipped dcbsts `timing` says. Set before Init.
+  void SetJitTiming(const JitTiming* timing) { m_jit_timing = timing; }
   bool AotHasBlock() { return m_block_cache.Dispatch() != nullptr; }
   // One block, from the cache or compiled now, at the PC (what Run does between timing checks).
   void AotExecuteOneBlock()
@@ -157,8 +142,7 @@ private:
   static s32 DcbxLoop(PowerPC::PowerPCState& ppc_state, const DcbxLoopOperands& operands);
   static s32 DcbxLoop(std::ostream& stream, const DcbxLoopOperands& operands);
 
-  bool m_jit_timed = false;
-  u32 (*m_jit_op)(const PPCAnalyst::CodeOp& op) = nullptr;
+  const JitTiming* m_jit_timing = nullptr;
 
   Common::RangeSizeSet<u8*> m_free_ranges;
   CachedInterpreterBlockCache m_block_cache;

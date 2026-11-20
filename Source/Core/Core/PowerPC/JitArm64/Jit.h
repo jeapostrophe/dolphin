@@ -8,10 +8,12 @@
 #include <memory>
 #include <string>
 #include <optional>
+#include <span>
 
 #include "Common/Arm64Emitter.h"
 #include "Common/RangeSizeSet.h"
 
+#include "Core/PowerPC/CachedInterpreter/JitTiming.h"
 #include "Core/PowerPC/JitArm64/JitArm64Cache.h"
 #include "Core/PowerPC/JitArm64/JitArm64_Aot.h"
 #include "Core/PowerPC/JitArm64/JitArm64_RegCache.h"
@@ -24,7 +26,10 @@
 class CachedInterpreter;
 class HostDisassembler;
 
-class JitArm64 : public JitBase, public Arm64Gen::ARM64CodeBlock, public CommonAsmRoutinesBase
+class JitArm64 : public JitBase,
+                 public Arm64Gen::ARM64CodeBlock,
+                 public CommonAsmRoutinesBase,
+                 public JitTiming
 {
 public:
   explicit JitArm64(Core::System& system);
@@ -312,9 +317,23 @@ protected:
   bool DoJit(u32 em_address, JitBlock* b, u32 nextPC);
 
   // The AOT form (JitArm64_Aot.h, JitArm64_Aot.cpp; retro-trainer HH-34)
-  static void AotMissTrampoline(JitArm64& jit, u32 em_address);
-  // How this JIT leaves a block after `op` (CachedInterpreter::JitExit), for its interp misses.
-  static u32 AotExitKind(const PPCAnalyst::CodeOp& op);
+  // JitTiming, for the Cached Interpreter that runs the AOT interp's misses; dcbx and dcbt ask
+  // the last two too.
+  Exit ExitAfter(const PPCAnalyst::CodeOp& op) const override;
+  bool BatchesDcbxLoop(const PPCAnalyst::CodeOp* ops, bool can_merge) const override;
+  bool SkipsNextOp(const PPCAnalyst::CodeOp* ops, bool can_merge) const override;
+  bool DcbxFallsBack() const;
+  // The handler this JIT's tables give `inst`.
+  static Instruction OpHandler(UGeckoInstruction inst);
+
+  struct AotRoutine
+  {
+    const char* name;
+    const u8* JitArm64::* member;
+  };
+  using AotQuantizedTable = const u8** JitArm64::*;
+  static std::span<const AotRoutine> AotRoutines();
+  static std::span<const AotQuantizedTable> AotQuantizedTables();
   void AllocCodeRegions(bool executable);
   void AotInit();
   void AotRegisterImports();
@@ -324,7 +343,7 @@ protected:
   void AotRoutinesGenerated(const u8* begin, const u8* end);
   u64 AotImportsHash() const;
   u64 AotAbiHash() const;
-  bool AotHeader(u8* out, u32 nblocks, u32 code_size, const std::string& core_uuid) const;
+  bool AotHeader(u8* out, u32 nblocks, u32 code_size, const u8* core_uuid) const;
   bool AotOpenImage(const std::string& path, std::string* why);
   void AotStartInterpreter();
   void AotMiss(u32 em_address);
@@ -334,22 +353,13 @@ protected:
   void AotReport();
   void AotShutdown();
   [[noreturn]] void AotEmit();
-  const u8** AotQuantizedTable(int which);
-  // The constant-address specializations bake in what the BATs and MMIO map say at compile time;
-  // the AOT form never takes them.
-  bool AotIsOptimizableRAMAddress(u32 address, u32 access_size) const
-  {
-    return !m_aot && m_mmu.IsOptimizableRAMAddress(address, access_size);
-  }
-  u32 AotIsOptimizableMMIOAccess(u32 address, u32 access_size) const
-  {
-    return m_aot ? 0 : m_mmu.IsOptimizableMMIOAccess(address, access_size);
-  }
+  // Space for a table of 8 quantized routines, `which` of AotQuantizedTables(): in the code, or for
+  // the AOT form data outside it, so the code holds no address.
+  const u8** QuantizedTable(int which);
 
   std::unique_ptr<JitArm64Aot::State> m_aot;
   std::unique_ptr<CachedInterpreter> m_aot_ci;
   bool m_aot_refused = false;
-  bool m_aot_emitting = false;
   JitBlock* m_aot_last_block = nullptr;
   Arm64Gen::FixupBranch m_aot_far_skip;
 

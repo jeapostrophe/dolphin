@@ -135,9 +135,9 @@ void JitArm64::SafeLoadToReg(u32 dest, s32 addr, s32 offsetReg, u32 flags, s32 o
   u32 access_size = BackPatchInfo::GetFlagSize(flags);
   u32 mmio_address = 0;
   if (is_immediate)
-    mmio_address = AotIsOptimizableMMIOAccess(imm_addr, access_size);
+    mmio_address = m_mmu.IsOptimizableMMIOAccess(imm_addr, access_size);
 
-  if (is_immediate && AotIsOptimizableRAMAddress(imm_addr, access_size))
+  if (is_immediate && m_mmu.IsOptimizableRAMAddress(imm_addr, access_size))
   {
     set_addr_reg_if_needed();
     EmitBackpatchRoutine(flags, MemAccessMode::AlwaysFastAccess, dest_reg, XA, regs_in_use,
@@ -282,7 +282,7 @@ void JitArm64::SafeStoreFromReg(s32 dest, u32 value, s32 regOffset, u32 flags, s
   u32 access_size = BackPatchInfo::GetFlagSize(flags);
   u32 mmio_address = 0;
   if (is_immediate)
-    mmio_address = AotIsOptimizableMMIOAccess(imm_addr, access_size);
+    mmio_address = m_mmu.IsOptimizableMMIOAccess(imm_addr, access_size);
 
   if (is_immediate && jo.optimizeGatherPipe && m_mmu.IsOptimizableGatherPipeWrite(imm_addr))
   {
@@ -310,7 +310,7 @@ void JitArm64::SafeStoreFromReg(s32 dest, u32 value, s32 regOffset, u32 flags, s
 
     js.fifoBytesSinceCheck += accessSize >> 3;
   }
-  else if (is_immediate && AotIsOptimizableRAMAddress(imm_addr, access_size))
+  else if (is_immediate && m_mmu.IsOptimizableRAMAddress(imm_addr, access_size))
   {
     set_addr_reg_if_needed();
     EmitBackpatchRoutine(flags, MemAccessMode::AlwaysFastAccess, RS, XA, regs_in_use, fprs_in_use);
@@ -700,22 +700,33 @@ void JitArm64::stmw(UGeckoInstruction inst)
     gpr.Unlock(ARM64Reg::W0);
 }
 
+// JITDISABLE(bJITLoadStoreOff) and FALLBACK_IF(m_accurate_cpu_cache_enabled), dcbx's two
+bool JitArm64::DcbxFallsBack() const
+{
+  return bJITOff || bJITLoadStoreOff || m_accurate_cpu_cache_enabled;
+}
+
+// Whether ops[0..2] match the loop dcbx compiles at once:
+// - dcbx rX
+// - addi rX,rX,32
+// - bdnz+ -8
+bool JitArm64::BatchesDcbxLoop(const PPCAnalyst::CodeOp* ops, bool can_merge) const
+{
+  const UGeckoInstruction inst = ops[0].inst;
+  return OpHandler(inst) == &JitArm64::dcbx && !DcbxFallsBack() && inst.RA == 0 && inst.RB != 0 &&
+         can_merge && (ops[1].inst.hex & 0xfc00'ffff) == 0x38000020 &&
+         ops[1].inst.RA_6 == inst.RB && ops[1].inst.RD_2 == inst.RB &&
+         ops[2].inst.hex == 0x4200fff8;
+}
+
 void JitArm64::dcbx(UGeckoInstruction inst)
 {
   INSTRUCTION_START
-  JITDISABLE(bJITLoadStoreOff);
-  FALLBACK_IF(m_accurate_cpu_cache_enabled);
+  FALLBACK_IF(DcbxFallsBack());
 
   u32 a = inst.RA, b = inst.RB;
 
-  // Check if the next instructions match a known looping pattern:
-  // - dcbx rX
-  // - addi rX,rX,32
-  // - bdnz+ -8
-  const bool make_loop = a == 0 && b != 0 && CanMergeNextInstructions(2) &&
-                         (js.op[1].inst.hex & 0xfc00'ffff) == 0x38000020 &&
-                         js.op[1].inst.RA_6 == b && js.op[1].inst.RD_2 == b &&
-                         js.op[2].inst.hex == 0x4200fff8;
+  const bool make_loop = BatchesDcbxLoop(js.op, CanMergeNextInstructions(2));
 
   constexpr ARM64Reg WA = ARM64Reg::W0, WB = ARM64Reg::W1, loop_counter = ARM64Reg::W2;
   // Be careful, loop_counter is only locked when make_loop == true.
@@ -878,6 +889,19 @@ void JitArm64::dcbx(UGeckoInstruction inst)
     gpr.Unlock(loop_counter);
 }
 
+// If a dcbst follows a dcbt, it probably isn't a case of dynamic code
+// modification, so don't bother invalidating the jit block cache.
+// This is important because invalidating the block cache when we don't
+// need to is terrible for performance.
+// (Invalidating the jit block cache on dcbst is a heuristic.)
+bool JitArm64::SkipsNextOp(const PPCAnalyst::CodeOp* ops, bool can_merge) const
+{
+  const UGeckoInstruction inst = ops[0].inst;
+  return OpHandler(inst) == &JitArm64::dcbt && !bJITOff && !bJITLoadStoreOff && can_merge &&
+         ops[1].inst.OPCD == 31 && ops[1].inst.SUBOP10 == 54 && ops[1].inst.RA == inst.RA &&
+         ops[1].inst.RB == inst.RB;
+}
+
 void JitArm64::dcbt(UGeckoInstruction inst)
 {
   INSTRUCTION_START
@@ -885,16 +909,8 @@ void JitArm64::dcbt(UGeckoInstruction inst)
 
   // Prefetch. Since we don't emulate the data cache, we don't need to do anything.
 
-  // If a dcbst follows a dcbt, it probably isn't a case of dynamic code
-  // modification, so don't bother invalidating the jit block cache.
-  // This is important because invalidating the block cache when we don't
-  // need to is terrible for performance.
-  // (Invalidating the jit block cache on dcbst is a heuristic.)
-  if (CanMergeNextInstructions(1) && js.op[1].inst.OPCD == 31 && js.op[1].inst.SUBOP10 == 54 &&
-      js.op[1].inst.RA == inst.RA && js.op[1].inst.RB == inst.RB)
-  {
+  if (SkipsNextOp(js.op, CanMergeNextInstructions(1)))
     js.skipInstructions = 1;
-  }
 }
 
 void JitArm64::dcbz(UGeckoInstruction inst)
