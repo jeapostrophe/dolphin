@@ -369,6 +369,45 @@ u64 JitArm64::AotAbiHash() const
   return Fnv64(text.data(), text.size());
 }
 
+// Lane-only (retro-trainer HH-34, never for a pinned core): every block dispatch's PC and
+// downcount, to DOLPHIN_TRACE_BLOCKS: from shape's dispatcher, and from interp's misses.
+static FILE* s_block_trace = [] {
+  const char* path = getenv("DOLPHIN_TRACE_BLOCKS");
+  return path && *path ? fopen(path, "w") : nullptr;
+}();
+
+void JitArm64::AotTraceBlock(u32 pc, s32 downcount, const PowerPC::PowerPCState* ppc)
+{
+  u64 h = Fnv64(ppc->gpr, sizeof(ppc->gpr));
+  h = Fnv64(ppc->ps, sizeof(ppc->ps), h);
+  // CR as the guest reads it: JitArm64 and the interpreter encode one field value differently
+  // and without its SO bits: JitArm64's compares leave junk in them (cmpl's 64-bit difference
+  // sets the encoding's bit 59 whenever LT), the interpreter copies XER.SO
+  const u32 more[] = {ppc->cr.Get() & 0xEEEEEEEE, ppc->xer_ca, ppc->xer_so_ov, ppc->fpscr.Hex,
+                      ppc->msr.Hex};
+  h = Fnv64(more, sizeof(more), h);
+  fprintf(s_block_trace, "%08x %d %016" PRIx64 "\n", pc, downcount, h);
+  static int full = 0;
+  static const u32 full_pc = [] {
+    const char* v = getenv("DOLPHIN_TRACE_PC");
+    return v ? static_cast<u32>(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (full++ < 3000 || pc == full_pc)
+  {
+    fprintf(s_block_trace, "  gpr");
+    for (u32 r : ppc->gpr)
+      fprintf(s_block_trace, " %08x", r);
+    fprintf(s_block_trace, "\n  cr %08x ca %x so_ov %x fpscr %08x msr %08x lr %08x ctr %08x\n",
+            ppc->cr.Get(), ppc->xer_ca, ppc->xer_so_ov, ppc->fpscr.Hex, ppc->msr.Hex, ppc->spr[SPR_LR],
+            ppc->spr[SPR_CTR]);
+  }
+}
+
+bool JitArm64::AotTracingBlocks()
+{
+  return s_block_trace != nullptr;
+}
+
 const u8** JitArm64::QuantizedTable(int which)
 {
   if (m_aot)
@@ -924,6 +963,8 @@ bool JitArm64::AotOpenImage(const std::string& path, std::string* why)
 // analyzer's on live memory; otherwise load stops, and interp runs it on the Cached Interpreter.
 void JitArm64::AotMiss(u32 em_address)
 {
+  if (s_block_trace)
+    AotTraceBlock(em_address, m_ppc_state.downcount, &m_ppc_state);
   // A block the Cached Interpreter holds already missed the image when it was first reached
   if (m_aot_ci && m_aot_ci->AotHasBlock())
   {
