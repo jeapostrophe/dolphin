@@ -155,7 +155,7 @@ struct State
   struct
   {
     u64 compiled = 0, unresolved_blocks = 0, installs = 0, misses = 0, interp_blocks = 0,
-        link_misses = 0;
+        link_misses = 0, unlinks = 0, fact_refusals = 0;
   } stats;
 };
 

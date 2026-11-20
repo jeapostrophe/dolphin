@@ -597,6 +597,7 @@ void JitArm64::AotUnlink(const JitBlock& block)
       it != m_aot->link_slot_of.end() && m_aot->link_table[it->second] == block.normalEntry)
   {
     m_aot->link_table[it->second] = m_aot->link_fallback;
+    m_aot->stats.unlinks++;
   }
 }
 
@@ -942,9 +943,14 @@ void JitArm64::AotMiss(u32 em_address)
     bool same = true;
     for (u32 i = 0; i < ib.nops && same; i++)
       same = ib.ops[2 * i] == m_code_buffer[i].address && ib.ops[2 * i + 1] == m_code_buffer[i].inst.hex;
-    js.blockStart = em_address;
-    if (!same || !AotFactsHold(ib))
+    if (!same)
       continue;
+    js.blockStart = em_address;
+    if (!AotFactsHold(ib))
+    {
+      m_aot->stats.fact_refusals++;
+      continue;
+    }
     JitBlock* b = blocks.AllocateBlock(em_address);
     b->normalEntry = const_cast<u8*>(m_aot->image_code + ib.code_off);
     b->near_begin = b->near_end = b->far_begin = b->far_end = nullptr;
@@ -1022,9 +1028,10 @@ void JitArm64::AotReport()
   const auto& s = m_aot->stats;
   fprintf(stderr,
           "JitArm64 AOT stats: %" PRIu64 " compiled (%" PRIu64 " with an unresolved host address), %" PRIu64
-          " installed, %" PRIu64 " missed, %" PRIu64 " interpreted; %zu links\n",
+          " installed, %" PRIu64 " missed, %" PRIu64 " interpreted; %zu links, %" PRIu64
+          " unlinked; %" PRIu64 " image blocks whose facts did not hold\n",
           s.compiled, s.unresolved_blocks, s.installs, s.misses, s.interp_blocks,
-          m_aot->link_keys.size());
+          m_aot->link_keys.size(), s.unlinks, s.fact_refusals);
 }
 
 void JitArm64::AotShutdown()
