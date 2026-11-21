@@ -61,7 +61,8 @@ public:
   // JitArm64's AOT interp runs the blocks its image lacks here, charged as JitArm64 charges them
   // (retro-trainer HH-34): blocks formed with the JIT's analyzer options, a block that goes on past
   // a branch (a followed one, or a conditional one not taken) ending only where JitArm64's would,
-  // and the exits, dcbx loops and skipped dcbsts `timing` says. Set before Init.
+  // and the exits, dcbx loops and skipped dcbsts `timing` says (JitTiming.h says what it leaves
+  // to the AOT form keeping alike). Set before Init.
   void SetJitTiming(const JitTiming* timing) { m_jit_timing = timing; }
   bool AotHasBlock() { return m_block_cache.Dispatch() != nullptr; }
   // One block, from the cache or compiled now, at the PC (what Run does between timing checks).

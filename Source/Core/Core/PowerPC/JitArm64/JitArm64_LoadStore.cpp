@@ -284,7 +284,7 @@ void JitArm64::SafeStoreFromReg(s32 dest, u32 value, s32 regOffset, u32 flags, s
   if (is_immediate)
     mmio_address = m_mmu.IsOptimizableMMIOAccess(imm_addr, access_size);
 
-  if (is_immediate && jo.optimizeGatherPipe && IsOptimizableGatherPipeWrite(imm_addr))
+  if (is_immediate && jo.optimizeGatherPipe && m_mmu.IsOptimizableGatherPipeWrite(imm_addr))
   {
     int accessSize;
     if (flags & BackPatchInfo::FLAG_SIZE_32)

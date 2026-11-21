@@ -378,7 +378,7 @@ void JitArm64::stfXX(UGeckoInstruction inst)
 
   if (is_immediate)
   {
-    if (jo.optimizeGatherPipe && IsOptimizableGatherPipeWrite(imm_addr))
+    if (jo.optimizeGatherPipe && m_mmu.IsOptimizableGatherPipeWrite(imm_addr))
     {
       int accessSize;
       if (flags & BackPatchInfo::FLAG_SIZE_64)

@@ -230,8 +230,9 @@ public:
   // JitArm64's AOT emit: instruction fetches answered from these words alone, as logged
   // (an address not among them is not readable).
   void SetAotFetchOverride(const std::unordered_map<u32, u32>* words) { m_aot_fetch = words; }
-  // JitArm64's AOT form (JitArm64_Aot.h): IsOptimizableMMIOAccess answers no (its code would hold
-  // the handlers' host addresses), and JitBase::IsAotForm reads it. The RAM and gather pipe
+  // JitArm64's AOT form (JitArm64_Aot.h): IsOptimizableMMIOAccess and IsOptimizableGatherPipeWrite
+  // answer no (MMIO code would hold the handlers' host addresses; the gather pipe's flushes and
+  // exception checks are not the Cached Interpreter's), and JitBase::IsAotForm reads it. The RAM
   // answers the form's blocks are compiled for are facts an image checks (JitArm64_Aot.cpp).
   void SetAotForm(bool aot_form) { m_aot_form = aot_form; }
   bool IsAotForm() const { return m_aot_form; }

@@ -21,18 +21,18 @@
 //   block installed where the JIT would have compiled it once its words and facts are checked; a
 //   miss stops;
 // - interp: load, with a miss run by the Cached Interpreter, charged as the JIT charges
-//   (CachedInterpreter::JitTiming). It does not leave the guest state the image's code would:
-//   the interpreter sets FPSCR's XX, FI and FX where JitArm64 does not, and JitArm64's compares
-//   leave junk in CR's SO bits where the interpreter copies XER.SO, so a run's results depend on
-//   which blocks its image holds.
+//   (CachedInterpreter::JitTiming; the gather pipe written through MMIO by both, the form keeping
+//   that optimization off). It does not leave the guest state the image's code would: the
+//   interpreter sets FPSCR's XX, FI and FX where JitArm64 does not, and JitArm64's compares leave
+//   junk in CR's SO bits where the interpreter copies XER.SO, so a run's results depend on which
+//   blocks its image holds.
 //
 // AOT-shaped code: every host address through PowerPCState::aot_imports (Arm64Gen's
 // AotImportResolver: pointers, calls, branches to the routines); no far code (it is emitted inline
-// and branched over); blocks linked through a link table, never by patching code; no BLR
-// optimization, fastmem or MMIO specializations (MMU::SetAotForm). A block's code is a function of
-// its words, its feature flags, the HLE hooks at its ops and its facts (the MMU's answers on its
-// constant addresses, the GPRs it speculates on, the JIT's history sets) alone; the image holds
-// all four, and a load installs a block only where they hold (JitArm64_Aot.cpp, "Links", "Facts").
+// and branched over); blocks linked through a table, never by patching code ("Links"); no BLR
+// optimization, fastmem, speculative constants, or gather pipe or MMIO specializations
+// (MMU::SetAotForm). A block's code is a function of its words, its feature flags, the HLE hooks
+// at its ops and its facts ("Facts") alone (sections of JitArm64_Aot.cpp).
 
 #pragma once
 
@@ -89,13 +89,19 @@ constexpr u32 R_QUANTIZED = 14;
 constexpr u32 R_COUNT = R_QUANTIZED + 32;
 
 // The link table (JitArm64_Aot.cpp, "Links"): LINKS_GROUPS import slots, each the base of
-// LINKS_GROUP entries, so an exit reaches its entry with two loads off PPC_REG.
+// LINKS_GROUP entries, so an exit reaches its entry with two loads, the first off PPC_REG.
 constexpr u32 LINKS_GROUP = 4096;
 constexpr u32 LINKS_GROUPS = 64;
 constexpr u32 LINKS_MAX = LINKS_GROUP * LINKS_GROUPS;
 // Each link's stub, its slot's value while its block is not there: DISPATCHER_PC = the link's
 // address, then the dispatcher's lookup (4 instructions).
 constexpr u32 LINK_STUB_SIZE = 16;
+
+// A block's, or a link's, key: its address and the feature flags it runs under.
+constexpr u64 AotKey(u32 ea, u32 feature_flags)
+{
+  return static_cast<u64>(feature_flags) << 32 | ea;
+}
 
 class Imports final : public Arm64Gen::AotImportResolver
 {
@@ -113,17 +119,12 @@ public:
   std::unordered_map<const void*, std::string> unresolved_seen;
 };
 
-// Facts (JitArm64_Aot.cpp, "Facts"): what a block's compile read of the machine's state besides
-// its words and hooks, each with the answer its code was compiled for. A fact is 4 words: kind,
-// a, b, answer.
+// A fact (JitArm64_Aot.cpp, "Facts") is 4 words: kind, a, b, and the answer the block's code was
+// compiled for.
 enum class Fact : u32
 {
-  Ram = 1,             // MMU::IsOptimizableRAMAddress(a, b)
-  GatherPipe = 2,      // MMU::IsOptimizableGatherPipeWrite(a)
-  SpeculateGate = 3,   // the block's address is not in noSpeculativeConstantsAddresses
-  Speculate = 4,       // GPR a looks like a gather pipe or MMIO constant; b its value when it does
-  PairedQuantize = 5,  // the block may assume its one GQR is 0
-  FifoWrite = 6,       // op address a is in fifoWriteAddresses (only answers of yes are kept)
+  Ram = 1,             // MMU::IsOptimizableRAMAddress(a, b): a constant address is plain RAM
+  PairedQuantize = 2,  // JitArm64::AssumesNoPairedQuantize: the block may assume its one GQR is 0
 };
 
 struct ImageBlock
@@ -147,15 +148,13 @@ struct State
   void* image_handle = nullptr;
   const u8* image_code = nullptr;
   size_t image_code_size = 0;
-  std::unordered_multimap<u64, ImageBlock> image_blocks;  // (feature_flags << 32 | ea)
-  // Links: entry k holds the code an exit to link_keys[k] (feature_flags << 32 | ea) branches to,
-  // that block's entry or its stub (link_stubs + LINK_STUB_SIZE * k: the image's, after its
-  // blocks; a shape run's, at the end of the far code region, which the form does not use)
+  std::unordered_multimap<u64, ImageBlock> image_blocks;  // by AotKey
+  // Links ("Links"): slot k's key, and its stub (link_stubs + LINK_STUB_SIZE * k)
   std::unique_ptr<const u8*[]> link_table;
   std::vector<u64> link_keys;
   std::unordered_map<u64, u32> link_slot_of;
   const u8* link_stubs = nullptr;
-  // Facts: the compile's, as it asks them (shape logs them); emit answers from its record's
+  // the compile's facts, as it asks them; emit answers from its record's (emit_facts)
   std::vector<u32> facts;
   const std::vector<u32>* emit_facts = nullptr;
   size_t emit_fact = 0;

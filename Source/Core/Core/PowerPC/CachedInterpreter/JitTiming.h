@@ -10,7 +10,9 @@ struct CodeOp;
 
 // The Cached Interpreter's JIT-timed mode (CachedInterpreter::SetJitTiming; JitArm64's AOT interp,
 // retro-trainer HH-34): what a JIT makes of a block's ops, asked of the JIT itself, from the
-// predicates its own compile asks, so the interpreter charges each block as the JIT charges it.
+// predicates its own compile asks, so the interpreter charges each block as the JIT's AOT form
+// charges it. That form keeps the gather pipe optimization off (MMU::SetAotForm), whose batched
+// flushes and mid-block exception checks nothing here models: both write the pipe through MMIO.
 class JitTiming
 {
 public:

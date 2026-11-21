@@ -354,20 +354,20 @@ protected:
   // Links: the slot of the exits to `destination` under the current feature flags (shape assigns
   // one and logs it; emit has them from the log), and a block's slot pointed at it once installed.
   u32 AotLinkSlot(u32 destination);
-  // Facts: the MMU's answers a block's code depends on, through these in every mode (the AOT
-  // form's compile records each, and its emit answers from the record), and whether a fact an
-  // image's block was compiled for holds now.
-  bool AotFact(JitArm64Aot::Fact kind, u32 a, u32 b, bool answer, u32* value = nullptr);
+  // Facts (JitArm64_Aot.cpp): a compile asks each through AotFact in every mode; AotFactLive is
+  // the one place each is answered from the machine's state, and AotFactsHold asks it again when
+  // a load installs an image's block at `ea`.
+  bool AotFact(JitArm64Aot::Fact kind, u32 a, u32 b);
+  bool AotFactLive(JitArm64Aot::Fact kind, u32 a, u32 b, u32 ea) const;
+  bool AotFactsHold(const JitArm64Aot::ImageBlock& ib, u32 ea) const;
   bool IsOptimizableRAMAddress(u32 address, u32 access_size);
-  bool IsOptimizableGatherPipeWrite(u32 address);
-  bool AotFactHolds(const u32* fact) const;
-  bool AotFactsHold(const JitArm64Aot::ImageBlock& ib) const;
-  bool LooksLikeSpeculativeConstant(u32 value) const;
-  bool AssumesNoPairedQuantize() const;
+  // Whether the block code_block holds, at `ea`, may assume its one GQR is 0 (checked at its start)
+  bool AssumesNoPairedQuantize(u32 ea) const;
   void AotLink(const JitBlock& block);
-  void AotAllocLinks();
-  // Writes link k's stub at `at` (LINK_STUB_SIZE bytes), and sets its slot to its stub.
-  void AotWriteLinkStub(u8* at, u32 k);
+  // The next slot for `key`; false when the table is full or holds it already.
+  bool AotAddLink(u64 key);
+  // Link k's stub's code at `at` (LINK_STUB_SIZE bytes; the caller makes it executable).
+  void AotEmitLinkStub(u8* at, u32 k);
   const u8* AotLinkStub(u32 k) const;
   std::vector<u32> AotBlockHooks() const;
   void AotDumpCode(const char* what, const u8* code, size_t len);
