@@ -36,6 +36,8 @@
 #ifdef _M_ARM_64
 #include "Core/PowerPC/JitArm64/JitArm64_Aot.h"
 #endif
+#include "Core/PowerPC/JitInterface.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "DolphinLibretro/Audio.h"
@@ -241,6 +243,22 @@ void retro_run(void)
       {
         fwrite(memory.GetRAM(), 1, memory.GetRamSizeReal(), f);
         fclose(f);
+      }
+    }
+    // Lane-only, likewise: DOLPHIN_POKE=N:<address>:<word> (hex) writes one instruction word at the
+    // start of run N, as a guest store would, then invalidates its line as an icbi would, so code
+    // the JIT or an image holds changes under it.
+    static const char* poke = getenv("DOLPHIN_POKE");
+    if (poke && atoi(poke) == runs)
+    {
+      u32 address = 0, word = 0;
+      if (sscanf(poke, "%*d:%x:%x", &address, &word) == 2)
+      {
+        auto& system = Core::System::GetInstance();
+        auto& memory = system.GetMemory();
+        memory.Write_U32(word, address & 0x3fffffff);
+        system.GetPPCState().iCache.Invalidate(memory, system.GetJitInterface(), address);
+        fprintf(stderr, "DOLPHIN_POKE: %08x = %08x at run %d\n", address, word, runs);
       }
     }
     runs++;
