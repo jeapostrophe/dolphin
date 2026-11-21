@@ -13,11 +13,13 @@
 // the frontend (TakeReport). Any mode runs JitArm64 on the software vertex loader (the vertex
 // loader JIT is the other writer of code), with FPRF on, and maps no fastmem arena.
 // - shape: the JIT, emitting AOT-shaped code (below) from its usual MAP_JIT cache, logging each
-//   block it compiles: its key, the guest words its compile read, its code's length and hash;
+//   block it compiles: its key, the guest words its compile read, its facts, its code's length
+//   and hash, and each link slot as it is assigned;
 // - emit: re-compiles each logged block from its logged words into plain memory, checks each is
 //   byte for byte the code the shape run compiled, writes <image>.code and <image>.meta, and exits;
 // - load: maps no code cache; the shared routines and the blocks come from the image's dylib, a
-//   block installed where the JIT would have compiled it once its words are checked; a miss stops;
+//   block installed where the JIT would have compiled it once its words and facts are checked; a
+//   miss stops;
 // - interp: load, with a miss run by the Cached Interpreter, charged as the JIT charges
 //   (CachedInterpreter::JitTiming). It does not leave the guest state the image's code would:
 //   the interpreter sets FPSCR's XX, FI and FX where JitArm64 does not, and JitArm64's compares
@@ -26,9 +28,11 @@
 //
 // AOT-shaped code: every host address through PowerPCState::aot_imports (Arm64Gen's
 // AotImportResolver: pointers, calls, branches to the routines); no far code (it is emitted inline
-// and branched over); no block linking, BLR optimization, fastmem, speculative constants, paired
-// quantize assumption, gather pipe or constant-address specializations (MMU::SetAotForm), so a
-// block's code is a function of its words, its feature flags and the HLE hooks at its ops alone.
+// and branched over); blocks linked through a link table, never by patching code; no BLR
+// optimization, fastmem or MMIO specializations (MMU::SetAotForm). A block's code is a function of
+// its words, its feature flags, the HLE hooks at its ops and its facts (the MMU's answers on its
+// constant addresses, the GPRs it speculates on, the JIT's history sets) alone; the image holds
+// all four, and a load installs a block only where they hold (JitArm64_Aot.cpp, "Links", "Facts").
 
 #pragma once
 

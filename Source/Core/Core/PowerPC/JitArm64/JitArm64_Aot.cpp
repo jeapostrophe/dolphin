@@ -338,7 +338,8 @@ using namespace JitArm64Aot;
 
 // The registers and settings a block's code depends on, as they stand in this JIT: the jo flags,
 // JitBase's JIT_SETTINGS that change what a block compiles to (the per-category bJIT*Off among
-// them), and whether the MMU's address specializations are off (MMU::SetAotForm).
+// them), whether the MMU's MMIO specializations are off (MMU::SetAotForm), and the link table's
+// size.
 u64 JitArm64::AotAbiHash() const
 {
   std::string text = fmt::format(
