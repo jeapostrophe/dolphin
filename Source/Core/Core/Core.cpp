@@ -195,6 +195,9 @@ void DisplayMessage(std::string message, int time_in_ms)
   if (!std::ranges::all_of(message, Common::IsPrintableCharacter))
     return;
 
+  // The log carries what the screen shows, so a frontend without the picture (a headless run, a
+  // device log) can read it: "Wii Remote 1 connected" is one.
+  NOTICE_LOG_FMT(CORE, "OSD: {}", message);
   OSD::AddMessage(std::move(message), time_in_ms);
 }
 
