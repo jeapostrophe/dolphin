@@ -1337,8 +1337,16 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
 #endif
   auto& si = Core::System::GetInstance().GetSerialInterface();
 
-  if (device == RETRO_DEVICE_GC_ON_WII) // Disconnect Wii device if we're using GC controller as device type to avoid conflict
+  // Disconnect the Wii device if we're using a GC controller as the device type, to avoid a
+  // conflict. The source is stored before it is applied, as RETRO_DEVICE_NONE does: the SI device
+  // set below fires the config-changed callback Wiimote::Initialize registers (RefreshConfig),
+  // which re-applies every port's stored source and would reconnect Wii Remote 1 (Emulated).
+  // Only ports 0-3 have a Wii Remote (GetInfoForWiimoteSource does not check its index).
+  if (device == RETRO_DEVICE_GC_ON_WII && port < 4)
+  {
+    Config::SetBaseOrCurrent(Config::GetInfoForWiimoteSource(port), WiimoteSource::None);
     WiimoteCommon::OnSourceChanged(port, WiimoteSource::None);
+  }
 
   Core::System& system = Core::System::GetInstance();
 
