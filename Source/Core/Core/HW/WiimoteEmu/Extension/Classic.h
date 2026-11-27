@@ -184,6 +184,10 @@ public:
   void Update(const DesiredExtensionState& target_state) override;
   void Reset() override;
 
+  // The buttons, d-pad and digital triggers held now, as BUTTON_*, PAD_* and TRIGGER_* bits
+  // (1 = held).
+  u16 GetCurrentlyPressedButtons();
+
   ControllerEmu::ControlGroup* GetGroup(ClassicGroup group);
 
   static constexpr u16 PAD_RIGHT = 0x80;

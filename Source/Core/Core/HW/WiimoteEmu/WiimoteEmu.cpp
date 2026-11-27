@@ -683,6 +683,21 @@ ButtonData Wiimote::GetCurrentlyPressedButtons()
   m_dpad->GetState(&buttons.hex, IsSideways() ? dpad_sideways_bitmasks : dpad_bitmasks,
                    m_input_override_function);
 
+#ifdef __LIBRETRO__
+  // With a Classic Controller attached the libretro port maps no Wii Remote button
+  // (retro_set_controller_port_device_wii), so a remote the game put to sleep (WPAD's idle
+  // timeout, 5 minutes without input) could never be woken. The Classic's buttons wake it too,
+  // reported as the remote's A: WiimoteDevice::PrepareInput reads this only to wake the remote.
+  // The selected attachment, not the active one: a sleeping remote's Reset has made that None.
+  constexpr auto classic = static_cast<int>(ExtensionNumber::CLASSIC);
+  if (m_attachments->GetSelectedAttachment() == classic &&
+      static_cast<Classic*>(m_attachments->GetAttachmentList()[classic].get())
+              ->GetCurrentlyPressedButtons() != 0)
+  {
+    buttons.a = 1;
+  }
+#endif
+
   return buttons;
 }
 

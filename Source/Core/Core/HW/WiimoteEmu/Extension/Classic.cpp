@@ -82,6 +82,17 @@ Classic::Classic() : Extension1stParty("Classic", _trans("Classic Controller"))
   }
 }
 
+u16 Classic::GetCurrentlyPressedButtons()
+{
+  u16 buttons = 0;
+  ControlState triggers[2] = {0, 0};
+  m_triggers->GetState(&buttons, classic_trigger_bitmasks.data(), triggers,
+                       m_input_override_function);
+  m_buttons->GetState(&buttons, classic_button_bitmasks.data(), m_input_override_function);
+  m_dpad->GetState(&buttons, classic_dpad_bitmasks.data(), m_input_override_function);
+  return buttons;
+}
+
 void Classic::BuildDesiredExtensionState(DesiredExtensionState* target_state)
 {
   using ControllerEmu::MapFloat;
