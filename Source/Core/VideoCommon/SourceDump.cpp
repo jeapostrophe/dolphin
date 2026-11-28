@@ -35,7 +35,10 @@ bool s_env_read = false;
 u64 s_frame = 0;
 std::map<std::string, Use> s_uses;
 std::set<std::string> s_frame_names;
-std::set<std::pair<u32, u32>> s_copies;  // [begin, end) of guest memory an EFB copy wrote
+// [begin, end) of guest memory an EFB copy wrote -> the frame it last did: memory a copy wrote
+// within the last kCopyFrames frames holds a copy, and older copy memory may hold art again
+std::map<std::pair<u32, u32>, u64> s_copies;
+constexpr u64 kCopyFrames = 60;
 
 void ReadEnv()
 {
@@ -82,16 +85,16 @@ const std::vector<u8>& IdentityTlut()
 
 void OnEfbCopy(u32 address, u32 size)
 {
-  s_copies.emplace(address, address + size);
+  s_copies[{address, address + size}] = s_frame;
 }
 
 bool OnCreate(const TextureInfo& info, const std::string& name, u32 levels)
 {
   ReadEnv();
   const u32 begin = info.GetRawAddress(), end = begin + info.GetTextureSize();
-  for (const auto& [b, e] : s_copies)
+  for (const auto& [range, frame] : s_copies)
   {
-    if (begin < e && b < end)
+    if (begin < range.second && range.first < end && s_frame - frame <= kCopyFrames)
       return false;
   }
   const std::string dir = DumpDir();
@@ -160,7 +163,10 @@ void OnFrameEnd()
 {
   ReadEnv();
   if (s_usage_prefix.empty())
+  {
+    ++s_frame;
     return;
+  }
   for (const auto& n : s_frame_names)
     s_uses[n].frames++;
   if (s_frame % s_every == 0)
