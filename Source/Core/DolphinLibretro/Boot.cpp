@@ -91,6 +91,20 @@ static void ConfigureAot()
 }
 #endif
 
+// An analysis-only switch (retro-trainer PLAN OPS-04): DOLPHIN_DUMP_TEXTURES=<dir> dumps every
+// texture the game decodes into <dir>/<game id>/, Dolphin's tex1_ PNGs (base level only) and
+// VideoCommon/SourceDump.h's indices, TLUTs and usage. Unset, nothing changes.
+static void ConfigureTextureDump()
+{
+  const char* dir = getenv("DOLPHIN_DUMP_TEXTURES");
+  if (!dir || !*dir)
+    return;
+  File::SetUserPath(D_DUMPTEXTURES_IDX, dir);
+  Config::SetBase(Config::GFX_DUMP_TEXTURES, true);
+  Config::SetBase(Config::GFX_DUMP_BASE_TEXTURES, true);
+  Config::SetBase(Config::GFX_DUMP_MIP_TEXTURES, false);
+}
+
 namespace Libretro
 {
 extern retro_environment_t environ_cb;
@@ -661,6 +675,7 @@ bool retro_load_game(const struct retro_game_info* game)
 #ifdef _M_ARM_64
   ConfigureAot();
 #endif
+  ConfigureTextureDump();
   NOTICE_LOG_FMT(BOOT, "CPU Core: {}", Libretro::Options::CPUCoreToString(Config::Get(Config::MAIN_CPU_CORE)));
   NOTICE_LOG_FMT(BOOT, "Fastmem enabled = {}", (Config::Get(Config::MAIN_FASTMEM)) ? "Yes" : "No");
   NOTICE_LOG_FMT(BOOT, "JIT debug enabled = {}", Config::IsDebuggingEnabled() ? "Yes" : "No");

@@ -168,6 +168,8 @@ struct TCacheEntry
   u32 pending_efb_copy_height = 0;
 
   std::string texture_info_name = "";
+  // Its tex1 name, set only while dumping textures (VideoCommon/SourceDump.h)
+  std::string dump_name;
 
   VideoCommon::CustomAsset::TimeType last_load_time;
   std::shared_ptr<HiresTexture> hires_texture;

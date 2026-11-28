@@ -37,6 +37,7 @@
 #include "VideoCommon/AbstractFramebuffer.h"
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/AbstractStagingTexture.h"
+#include "VideoCommon/SourceDump.h"
 #include "VideoCommon/Assets/CustomTextureData.h"
 #include "VideoCommon/Assets/TextureAssetUtils.h"
 #include "VideoCommon/BPMemory.h"
@@ -113,6 +114,9 @@ void TextureCacheBase::Shutdown()
   m_pending_efb_copies.clear();
 
   HiresTexture::Shutdown();
+
+  if (g_ActiveConfig.bDumpTextures)
+    VideoCommon::SourceDump::Flush();
 
   // For correctness, we need to invalidate textures before the gpu context starts shutting down.
   Invalidate();
@@ -791,6 +795,9 @@ void TextureCacheBase::OnFrameEnd()
   FlushEFBCopies();
 
   Cleanup(g_presenter->FrameCount());
+
+  if (g_ActiveConfig.bDumpTextures)
+    VideoCommon::SourceDump::OnFrameEnd();
 }
 
 void TCacheEntry::DoState(PointerWrap& p)
@@ -1245,18 +1252,15 @@ private:
 
 TCacheEntry* TextureCacheBase::Load(u32 stage)
 {
-  if (auto entry = LoadImpl(stage, false))
+  TCacheEntry* entry = LoadImpl(stage, false);
+  if (entry && DidLinkedAssetsChange(*entry))
   {
-    if (!DidLinkedAssetsChange(*entry))
-    {
-      return entry;
-    }
-
     InvalidateTexture(GetTexCacheIter(entry));
-    return LoadImpl(stage, true);
+    entry = LoadImpl(stage, true);
   }
-
-  return nullptr;
+  if (entry && g_ActiveConfig.bDumpTextures)
+    VideoCommon::SourceDump::OnBind(entry->dump_name);
+  return entry;
 }
 
 TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
@@ -1774,6 +1778,8 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
     if (g_ActiveConfig.bDumpTextures && !skip_texture_dump && texLevels > 0)
     {
       const std::string basename = texture_info.CalculateTextureName().GetFullName();
+      entry->dump_name = basename;
+      VideoCommon::SourceDump::OnCreate(texture_info, basename, texLevels);
       if (g_ActiveConfig.bDumpBaseTextures)
       {
         m_texture_dumper.DumpTexture(*entry->texture, basename, 0, entry->has_arbitrary_mips);
