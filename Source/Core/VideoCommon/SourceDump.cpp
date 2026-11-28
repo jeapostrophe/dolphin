@@ -35,6 +35,7 @@ bool s_env_read = false;
 u64 s_frame = 0;
 std::map<std::string, Use> s_uses;
 std::set<std::string> s_frame_names;
+std::set<std::pair<u32, u32>> s_copies;  // [begin, end) of guest memory an EFB copy wrote
 
 void ReadEnv()
 {
@@ -79,9 +80,20 @@ const std::vector<u8>& IdentityTlut()
 }
 }  // namespace
 
-void OnCreate(const TextureInfo& info, const std::string& name, u32 levels)
+void OnEfbCopy(u32 address, u32 size)
+{
+  s_copies.emplace(address, address + size);
+}
+
+bool OnCreate(const TextureInfo& info, const std::string& name, u32 levels)
 {
   ReadEnv();
+  const u32 begin = info.GetRawAddress(), end = begin + info.GetTextureSize();
+  for (const auto& [b, e] : s_copies)
+  {
+    if (begin < e && b < end)
+      return false;
+  }
   const std::string dir = DumpDir();
   if (!File::IsDirectory(dir))
     File::CreateFullPath(dir);
@@ -132,6 +144,7 @@ void OnCreate(const TextureInfo& info, const std::string& name, u32 levels)
       fmt::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\n", name, info.GetRawWidth(), info.GetRawHeight(),
                   static_cast<int>(format), idx_name, tlut_name, levels);
   tsv.WriteString(line);
+  return true;
 }
 
 void OnBind(const std::string& name)

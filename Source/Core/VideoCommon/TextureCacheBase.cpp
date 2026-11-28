@@ -1778,17 +1778,20 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
     if (g_ActiveConfig.bDumpTextures && !skip_texture_dump && texLevels > 0)
     {
       const std::string basename = texture_info.CalculateTextureName().GetFullName();
-      entry->dump_name = basename;
-      VideoCommon::SourceDump::OnCreate(texture_info, basename, texLevels);
-      if (g_ActiveConfig.bDumpBaseTextures)
+      if (VideoCommon::SourceDump::OnCreate(texture_info, basename, texLevels))
       {
-        m_texture_dumper.DumpTexture(*entry->texture, basename, 0, entry->has_arbitrary_mips);
-      }
-      if (g_ActiveConfig.bDumpMipmapTextures)
-      {
-        for (u32 level = 1; level < texLevels; ++level)
+        entry->dump_name = basename;
+        if (g_ActiveConfig.bDumpBaseTextures)
         {
-          m_texture_dumper.DumpTexture(*entry->texture, basename, level, entry->has_arbitrary_mips);
+          m_texture_dumper.DumpTexture(*entry->texture, basename, 0, entry->has_arbitrary_mips);
+        }
+        if (g_ActiveConfig.bDumpMipmapTextures)
+        {
+          for (u32 level = 1; level < texLevels; ++level)
+          {
+            m_texture_dumper.DumpTexture(*entry->texture, basename, level,
+                                         entry->has_arbitrary_mips);
+          }
         }
       }
     }
@@ -2265,6 +2268,8 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     ERROR_LOG_FMT(VIDEO, "Trying to copy from EFB to invalid address {:#010x}", dstAddr);
     return;
   }
+  if (g_ActiveConfig.bDumpTextures)
+    VideoCommon::SourceDump::OnEfbCopy(dstAddr, covered_range);
 
   if (g_ActiveConfig.bGraphicMods)
   {

@@ -12,6 +12,8 @@
 //   textures.tsv                             a line per texture this process created: its tex1
 //                                            name, width, height, TextureFormat, .idx name, TLUT
 //                                            name, mip levels (- where none);
+// A texture read from memory an EFB or XFB copy has written is the game's own rendering, not its
+// art: it is neither dumped nor counted (snp2 decodes two or three 608x456 copies a frame).
 // and, when DOLPHIN_DUMP_TEXTURES_USAGE=<prefix> is set, per texture name the frames it was bound
 // in and its binds (<prefix>.counts.tsv, rewritten every 600 frames and at shutdown), and every
 // DOLPHIN_DUMP_TEXTURES_EVERY-th frame's bound names (<prefix>.frames.txt, default every 300).
@@ -27,8 +29,11 @@ class TextureInfo;
 
 namespace VideoCommon::SourceDump
 {
+// An EFB or XFB copy wrote [address, address + size) of guest memory.
+void OnEfbCopy(u32 address, u32 size);
 // A texture entry was decoded from guest memory under tex1 name `name`, with `levels` levels.
-void OnCreate(const TextureInfo& info, const std::string& name, u32 levels);
+// False when it lies in memory a copy wrote (OnEfbCopy): then nothing of it is dumped.
+bool OnCreate(const TextureInfo& info, const std::string& name, u32 levels);
 // A texture entry named `name` was bound for a draw.
 void OnBind(const std::string& name);
 void OnFrameEnd();
